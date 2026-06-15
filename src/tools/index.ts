@@ -7,7 +7,6 @@ import { actionTools } from './actions.js';
 import { manifestTools } from './manifest.js';
 import { authTools } from './auth.js';
 import { socialTools } from './social.js';
-import { fireteamTools } from './fireteam.js';
 
 /** The full set of tools exposed by the server. */
 export const allTools: ToolDef[] = [
@@ -18,7 +17,6 @@ export const allTools: ToolDef[] = [
   ...actionTools,
   ...manifestTools,
   ...socialTools,
-  ...fireteamTools,
   ...authTools,
 ];
 

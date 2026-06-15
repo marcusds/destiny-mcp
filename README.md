@@ -1,8 +1,8 @@
 # d2-mcp — Destiny 2 MCP Server
 
 A comprehensive [Model Context Protocol](https://modelcontextprotocol.io) server for the
-[Bungie.net Destiny 2 API](https://bungie-net.github.io/multi/index.html). It exposes **83 tools**
-spanning public reads, authenticated write actions, clan management, friends, fireteams, and a
+[Bungie.net Destiny 2 API](https://bungie-net.github.io/multi/index.html). It exposes **79 tools**
+spanning public reads, authenticated write actions, clan management, friends, and a
 local manifest cache.
 
 > Forked from [`DevNvll/destiny-mcp`](https://github.com/DevNvll/destiny-mcp) (MIT) and extended with
@@ -20,7 +20,6 @@ local manifest cache.
 | **Clans (read)**          | `get_clan`, `get_clan_by_name`, `get_clan_members`, `get_clan_admins`, `get_groups_for_member`, `get_potential_groups_for_member`, `search_clans`, `get_clan_weekly_reward_state`, `get_clan_banner_source`                                                                                                                                         |
 | **Clans (auth/write)**    | `get_clan_pending_members`, `get_clan_banned_members`, `get_clan_invited_individuals`, `invite_clan_member`, `approve_clan_member`, `approve_all_clan_pending`, `deny_all_clan_pending`, `kick_clan_member`, `ban_clan_member`, `unban_clan_member`, `edit_clan`, `edit_clan_banner`                                                                |
 | **Friends (auth)**        | `get_friend_list`, `get_friend_request_list`, `issue_friend_request`, `accept_friend_request`, `decline_friend_request`, `remove_friend`, `remove_friend_request`, `get_platform_friend_list`                                                                                                                                                       |
-| **Fireteams (auth)**      | `get_available_clan_fireteams`, `search_public_clan_fireteams`, `get_my_clan_fireteams`, `get_clan_fireteam`                                                                                                                                                                                                                                        |
 | **Authenticated reads**   | `get_current_user`, `get_character_vendors`, `get_character_vendor`, `get_collectible_node_details`                                                                                                                                                                                                                                                 |
 | **Inventory writes**      | `transfer_item`, `pull_from_postmaster`, `equip_item`, `equip_items`, `set_item_lock_state`, `set_quest_tracked_state`, `insert_socket_plug_free`                                                                                                                                                                                                   |
 | **Loadout writes**        | `equip_loadout`, `snapshot_loadout`, `clear_loadout`, `update_loadout_identifiers`                                                                                                                                                                                                                                                                  |
@@ -102,8 +101,7 @@ network round-trip per hash and lets you resolve item/activity names offline.
 ## Coverage & caveats
 
 Covers the gameplay-relevant Bungie API surface: Destiny2 (profiles, items, stats, vendors, all
-inventory/loadout write actions), GroupV2 (clan reads + full management), User, Social/Friends, and
-the legacy Fireteam service.
+inventory/loadout write actions), GroupV2 (clan reads + full management), User, and Social/Friends.
 
 - **Private profiles:** `get_destiny_profile` / `get_destiny_character` / `get_destiny_item`
   automatically attach your OAuth token when authenticated, so private components (full vault, etc.)
@@ -111,9 +109,10 @@ the legacy Fireteam service.
 - **`search_destiny_entities`** targets a Bungie endpoint that Bungie has **disabled server-side**
   (returns `ErrorCode 21 NotFound`). It's kept for completeness — use **`manifest_search`** instead,
   which searches the local cache and works.
-- **Modern Fireteam Finder is not implemented.** Those operations are absent from Bungie's published
-  API spec (only entity/definition schemas exist), so they can't be targeted reliably. The documented
-  _legacy_ clan Fireteam endpoints are included.
+- **No fireteam tools.** The legacy clan Fireteam service is dead — its endpoints return
+  `ErrorCode 5 SystemDisabled`. The modern Fireteam Finder that replaced it is absent from Bungie's
+  published API spec (only entity/definition schemas exist), so it can't be targeted reliably.
+  Neither is included.
 - **Intentionally skipped** (low value for a play-assistant): Forum, Content/CMS, Trending,
   CommunityContent, Tokens/Bungie Rewards, and App-usage endpoints.
 
