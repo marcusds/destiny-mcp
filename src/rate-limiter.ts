@@ -1,41 +1,48 @@
+/**
+ * Sliding-window client-side rate limiter.
+ *
+ * Bungie's platform allows a burst of requests per rolling window; we throttle
+ * locally to stay under it. Acquisitions are serialized through a promise chain
+ * so the "is there room in the window?" check and the recording of a new request
+ * are atomic — without that, concurrent callers could all observe room and blow
+ * past the limit together.
+ */
 export class RateLimiter {
-  private requests: number[] = [];
-  private maxRequests: number;
-  private windowMs: number;
+  private timestamps: number[] = [];
+  private tail: Promise<void> = Promise.resolve();
 
-  constructor(maxRequests: number = 25, windowMs: number = 10000) {
-    this.maxRequests = maxRequests;
-    this.windowMs = windowMs;
+  constructor(
+    private readonly maxRequests = 25,
+    private readonly windowMs = 10_000
+  ) {}
+
+  /** Resolves once it is safe to make a request, having reserved a slot. */
+  acquire(): Promise<void> {
+    const next = this.tail.then(() => this.reserve());
+    // Keep the chain alive even if a reservation rejects (it never should).
+    this.tail = next.catch(() => undefined);
+    return next;
   }
 
-  async checkLimit(): Promise<void> {
-    const now = Date.now();
-
-    this.requests = this.requests.filter((time) => now - time < this.windowMs);
-
-    if (this.requests.length >= this.maxRequests) {
-      const oldestRequest = Math.min(...this.requests);
-      const waitTime = this.windowMs - (now - oldestRequest);
-
-      if (waitTime > 0) {
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
-        return this.checkLimit();
-      }
+  private async reserve(): Promise<void> {
+    this.prune();
+    if (this.timestamps.length >= this.maxRequests) {
+      const waitMs = this.windowMs - (Date.now() - this.timestamps[0]);
+      if (waitMs > 0) await delay(waitMs);
+      this.prune();
     }
-
-    this.requests.push(now);
+    this.timestamps.push(Date.now());
   }
 
-  getRemainingRequests(): number {
-    const now = Date.now();
-    this.requests = this.requests.filter((time) => now - time < this.windowMs);
-    return Math.max(0, this.maxRequests - this.requests.length);
+  /** Drop timestamps that have aged out of the window. */
+  private prune(): void {
+    const cutoff = Date.now() - this.windowMs;
+    let i = 0;
+    while (i < this.timestamps.length && this.timestamps[i] <= cutoff) i++;
+    if (i > 0) this.timestamps.splice(0, i);
   }
+}
 
-  getResetTime(): number {
-    if (this.requests.length === 0) return 0;
-    const now = Date.now();
-    const oldestRequest = Math.min(...this.requests);
-    return Math.max(0, this.windowMs - (now - oldestRequest));
-  }
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

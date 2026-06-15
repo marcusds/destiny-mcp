@@ -61,7 +61,7 @@ export class DestinyAPI {
     url: string,
     opts: { params?: any; data?: any; headers?: Record<string, string> } = {}
   ): Promise<any> {
-    await this.rateLimiter.checkLimit();
+    await this.rateLimiter.acquire();
     try {
       const response = await this.client.request({
         method,
