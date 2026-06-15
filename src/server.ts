@@ -28,7 +28,10 @@ export function buildContext(): ToolContext {
 }
 
 export function createMCPServer(ctx: ToolContext = buildContext()) {
-  const server = new Server({ name: 'd2-mcp', version: '2.0.0' }, { capabilities: { tools: {} } });
+  const server = new Server(
+    { name: 'destiny2', version: '2.0.0' },
+    { capabilities: { tools: {} } }
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: allTools.map((t) => t.definition),
@@ -88,7 +91,7 @@ export async function runHttpServer(port = 3000) {
     } else if (url.pathname === '/' || url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(
         JSON.stringify({
-          name: 'd2-mcp',
+          name: 'destiny2',
           version: '2.0.0',
           tools: allTools.length,
           transports: { streamableHttp: '/mcp', webSocket: `ws://<host>:${port}` },
