@@ -17,7 +17,7 @@ services:
       - "${D2_MCP_BIND:-0.0.0.0}:${D2_MCP_PORT:-3000}:3000"
     volumes:
       - d2-data:/data # tokens.json + SQLite manifest cache (~350MB)
-    command: ["node", "dist/index.js", "websocket", "--port", "3000"]
+    command: ["node", "dist/index.js", "http", "--port", "3000"]
 
 volumes:
   d2-data:

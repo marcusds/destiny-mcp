@@ -1,7 +1,13 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createServer } from 'http';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  isInitializeRequest,
+} from '@modelcontextprotocol/sdk/types.js';
+import { IncomingMessage, ServerResponse, createServer } from 'http';
+import { randomUUID } from 'crypto';
 import { WebSocketServer } from 'ws';
 
 import { DestinyAPI } from './destiny-api.js';
@@ -29,14 +35,10 @@ export function createMCPServer(ctx: ToolContext = buildContext()) {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const entry = toolMap.get(name);
-    if (!entry) {
-      return errorResult(`Unknown tool: ${name}`);
-    }
+    if (!entry) return errorResult(`Unknown tool: ${name}`);
     try {
       const result = await entry.handler(ctx, args ?? {});
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
@@ -59,25 +61,141 @@ export async function runStdioServer() {
   console.error(`d2-mcp running on stdio (${allTools.length} tools)`);
 }
 
-export async function runWebSocketServer(port = 3000) {
+/**
+ * Long-running HTTP server exposing two transports on one port:
+ *   - POST/GET/DELETE /mcp  → Streamable HTTP (the modern MCP transport)
+ *   - WebSocket upgrade     → legacy WebSocket transport
+ *   - GET /                 → plain-text health/info
+ *
+ * If D2_MCP_AUTH_TOKEN is set, both transports require `Authorization: Bearer <token>`.
+ */
+export async function runHttpServer(port = 3000) {
   const ctx = buildContext();
-  const httpServer = createServer();
-  const wss = new WebSocketServer({ server: httpServer });
+  const authToken = process.env.D2_MCP_AUTH_TOKEN || undefined;
 
-  wss.on('connection', (ws) => {
-    console.error('New WebSocket connection established');
-    const server = createMCPServer(ctx);
-    const transport = new WebSocketServerTransport(ws);
-    server.connect(transport).catch((error) => {
-      console.error('Server connection error:', error);
+  // Streamable HTTP keeps one transport per initialized session.
+  const sessions: Record<string, StreamableHTTPServerTransport> = {};
+
+  const httpServer = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+    if (url.pathname === '/mcp') {
+      void handleMcp(req, res);
+    } else if (url.pathname === '/' || url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(
+        JSON.stringify({
+          name: 'd2-mcp',
+          version: '2.0.0',
+          tools: allTools.length,
+          transports: { streamableHttp: '/mcp', webSocket: `ws://<host>:${port}` },
+          authRequired: Boolean(authToken),
+        })
+      );
+    } else {
+      res.writeHead(404).end('Not found');
+    }
+  });
+
+  async function handleMcp(req: IncomingMessage, res: ServerResponse) {
+    if (!authorized(req, authToken)) return sendJsonError(res, 401, -32001, 'Unauthorized');
+
+    try {
+      if (req.method === 'POST') {
+        const body = await readJson(req);
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        let transport = sessionId ? sessions[sessionId] : undefined;
+
+        if (!transport && isInitializeRequest(body)) {
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid) => {
+              sessions[sid] = transport!;
+            },
+          });
+          transport.onclose = () => {
+            if (transport!.sessionId) delete sessions[transport!.sessionId];
+          };
+          await createMCPServer(ctx).connect(transport);
+        } else if (!transport) {
+          return sendJsonError(res, 400, -32000, 'No valid session ID for non-initialize request');
+        }
+
+        await transport.handleRequest(req, res, body);
+      } else if (req.method === 'GET' || req.method === 'DELETE') {
+        // GET opens the SSE notification stream; DELETE terminates the session.
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        const transport = sessionId ? sessions[sessionId] : undefined;
+        if (!transport) return sendJsonError(res, 400, -32000, 'Invalid or missing session ID');
+        await transport.handleRequest(req, res);
+      } else {
+        res.writeHead(405).end('Method not allowed');
+      }
+    } catch (error) {
+      if (!res.headersSent) {
+        sendJsonError(res, 500, -32603, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
+  // WebSocket transport on the same port.
+  const wss = new WebSocketServer({ noServer: true });
+  httpServer.on('upgrade', (req, socket, head) => {
+    if (!authorized(req, authToken)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const transport = new WebSocketServerTransport(ws);
+      createMCPServer(ctx)
+        .connect(transport)
+        .catch((error) => console.error('WebSocket connection error:', error));
     });
-    ws.on('close', () => console.error('WebSocket connection closed'));
-    ws.on('error', (error) => console.error('WebSocket error:', error));
   });
 
   httpServer.listen(port, () => {
-    console.error(`d2-mcp running on WebSocket port ${port} (ws://localhost:${port})`);
+    console.error(
+      `d2-mcp listening on port ${port} — Streamable HTTP at /mcp, WebSocket on the same port` +
+        (authToken ? ' (auth required)' : '')
+    );
   });
 
   return { httpServer, wss };
+}
+
+/** Backwards-compatible alias — the server now serves both /mcp and WebSocket. */
+export const runWebSocketServer = runHttpServer;
+
+// -- helpers --------------------------------------------------------------
+
+function authorized(req: IncomingMessage, token: string | undefined): boolean {
+  if (!token) return true;
+  return req.headers['authorization'] === `Bearer ${token}`;
+}
+
+function readJson(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > 4_000_000) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(data ? JSON.parse(data) : undefined);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJsonError(res: ServerResponse, status: number, code: number, message: string) {
+  if (res.headersSent) return;
+  res
+    .writeHead(status, { 'Content-Type': 'application/json' })
+    .end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
 }

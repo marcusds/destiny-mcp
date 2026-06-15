@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { runStdioServer, runWebSocketServer } from './server.js';
+import { runStdioServer, runHttpServer } from './server.js';
 import { BungieAuth } from './auth.js';
 import { loadConfig } from './config.js';
 
@@ -20,17 +20,26 @@ program
   });
 
 program
-  .command('websocket')
-  .description('Run server as a WebSocket server for remote connections')
+  .command('http')
+  .description('Run the HTTP server: Streamable HTTP at /mcp + WebSocket on the same port')
   .option('-p, --port <port>', 'Port to listen on', '3000')
-  .action(async (options) => {
-    const port = parseInt(options.port, 10);
-    if (isNaN(port) || port < 1 || port > 65535) {
-      console.error('Invalid port number. Must be between 1 and 65535.');
-      process.exit(1);
-    }
-    await runWebSocketServer(port).catch(fail);
-  });
+  .action((options) => runLongLived(options));
+
+// Back-compat alias; the server now serves both /mcp and WebSocket.
+program
+  .command('websocket')
+  .description('Alias for `http` (serves both /mcp and WebSocket)')
+  .option('-p, --port <port>', 'Port to listen on', '3000')
+  .action((options) => runLongLived(options));
+
+async function runLongLived(options: { port: string }) {
+  const port = parseInt(options.port, 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error('Invalid port number. Must be between 1 and 65535.');
+    process.exit(1);
+  }
+  await runHttpServer(port).catch(fail);
+}
 
 program
   .command('auth')

@@ -46,10 +46,20 @@ Tools tagged `[auth]` require an OAuth login; `[write]` tools mutate live game s
 ## Running
 
 ```bash
-npm start                 # stdio mode (default; for Claude Desktop / MCP clients)
-npm run start:websocket   # WebSocket mode on :3000
-npm run start:websocket -- --port 3001
+npm start              # stdio mode (default; for clients that spawn the binary)
+npm run start:http     # HTTP server on :3000 — Streamable HTTP at /mcp + WebSocket
+npm run start:http -- --port 3001
 ```
+
+The HTTP server exposes two transports on one port:
+
+| Transport           | Endpoint                   | Use it for                                 |
+| ------------------- | -------------------------- | ------------------------------------------ |
+| **Streamable HTTP** | `http://<host>:<port>/mcp` | Archon and most modern MCP clients         |
+| **WebSocket**       | `ws://<host>:<port>`       | clients that speak the WebSocket transport |
+| **stdio**           | `node dist/index.js stdio` | clients that spawn the server process      |
+
+`GET http://<host>:<port>/` returns a small JSON health/info payload.
 
 ### Claude Desktop / MCP client config
 
@@ -72,13 +82,14 @@ npm run start:websocket -- --port 3001
 
 ## Docker
 
-The image runs the **WebSocket** transport (the natural fit for a long-running container).
-Stdio clients that spawn the binary should use the `node dist/index.js stdio` invocation above instead.
+The image runs the HTTP server (Streamable HTTP `/mcp` + WebSocket on one port) — the natural fit
+for a long-running container. Stdio clients that spawn the binary should use `node dist/index.js stdio`.
 
 ```bash
 cp .env.example .env       # fill in BUNGIE_API_KEY (+ OAuth vars)
 docker compose up -d --build
-# server is now on ws://localhost:3000
+# Streamable HTTP:  http://localhost:3000/mcp   (point Archon / modern clients here)
+# WebSocket:        ws://localhost:3000
 ```
 
 - **Binding:** the port is published on **all interfaces (`0.0.0.0`)** by default. The WebSocket
@@ -86,6 +97,8 @@ docker compose up -d --build
   reach this host+port has full access — keep it on a trusted/firewalled network or front it with an
   authenticating proxy. Set `D2_MCP_BIND=127.0.0.1` to restrict it to loopback.
 - **Port:** override the host port with `D2_MCP_PORT=3737 docker compose up -d` if 3000 is taken.
+- **Auth:** set `D2_MCP_AUTH_TOKEN` in `.env` to require `Authorization: Bearer <token>` on both
+  transports — strongly recommended whenever the port is reachable off-host.
 - **Persistence:** tokens + the ~350 MB SQLite manifest cache live in the named volume `d2-data`
   (mounted at `/data`), so they survive restarts and image rebuilds.
 - **Credentials** are read from `.env` via `env_file` — they are never baked into the image

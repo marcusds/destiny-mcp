@@ -33,6 +33,6 @@ RUN mkdir -p /data && chown -R node:node /data /app
 USER node
 VOLUME ["/data"]
 
-# WebSocket MCP transport
+# Streamable HTTP (/mcp) + WebSocket on the same port
 EXPOSE 3000
-CMD ["node", "dist/index.js", "websocket", "--port", "3000"]
+CMD ["node", "dist/index.js", "http", "--port", "3000"]
