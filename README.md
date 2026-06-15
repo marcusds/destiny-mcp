@@ -88,10 +88,11 @@ the `logout` command to clear tokens.
 
 ## Manifest cache
 
-The first call to `manifest_lookup` / `manifest_search` downloads the relevant definition table from
-Bungie and caches it on disk (`~/.d2-mcp/manifest/<version>/`), keyed by manifest version. Subsequent
-lookups are local and instant; a new game version transparently invalidates the cache. This avoids a
-network round-trip per hash and lets you resolve item/activity names offline.
+The first manifest call downloads Bungie's native **SQLite** manifest (`mobileWorldContentPaths`),
+unzips it, and caches the database on disk (`~/.d2-mcp/manifest/<version>/world.content`), keyed by
+manifest version. Lookups query the DB **row-by-row via `better-sqlite3`**, so a single hash lookup
+never loads an entire (tens-of-MB) definition table into memory. A new game version transparently
+re-downloads and prunes the old cache. The full DB is ~350 MB on disk.
 
 - `manifest_lookup` — resolve a single `{table, hash}` from the cache
 - `manifest_search` — find definitions by name (e.g. search `DestinyInventoryItemDefinition` for a weapon)
@@ -132,7 +133,7 @@ src/
   config.ts            env -> BungieConfig
   auth.ts              OAuth: login flow, disk persistence, auto-refresh
   destiny-api.ts       Bungie API client (public + Bearer-authed paths)
-  manifest.ts          versioned, on-disk definition cache
+  manifest.ts          versioned, on-disk SQLite manifest cache (better-sqlite3)
   rate-limiter.ts      sliding-window limiter
   server.ts            MCP server wiring (stdio + websocket)
   index.ts             CLI (stdio | websocket | auth | logout)

@@ -1,34 +1,29 @@
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+import AdmZip from 'adm-zip';
+import Database from 'better-sqlite3';
 import { BungieConfig } from './types.js';
 import { DestinyAPI } from './destiny-api.js';
 
 const BUNGIE_HOST = 'https://www.bungie.net';
 
-type DefinitionTable = Record<string, any>;
-
-interface ManifestMeta {
-  version: string;
-  /** locale -> { tableName -> relative path } */
-  componentPaths: Record<string, string>;
-}
-
 /**
- * Local Destiny 2 manifest cache.
+ * Local Destiny 2 manifest backed by Bungie's native SQLite database
+ * (`mobileWorldContentPaths`). The DB is downloaded + unzipped once per
+ * manifest version, cached on disk, and queried row-by-row — so a single hash
+ * lookup never loads an entire (tens-of-MB) definition table into memory.
  *
- * Bungie's manifest is enormous, so rather than the single combined world
- * content file we use `jsonWorldComponentContentPaths`, which exposes one URL
- * per definition table. Tables are downloaded on first use, cached on disk
- * keyed by manifest version, and memoized in memory. A version change
- * transparently invalidates the on-disk cache.
+ * Bungie stores each definition table as `(id INTEGER, json TEXT)` where `id`
+ * is the definition hash reinterpreted as a SIGNED 32-bit integer.
  */
 export class ManifestManager {
   private api: DestinyAPI;
   private locale: string;
   private rootDir: string;
-  private meta: ManifestMeta | null = null;
-  private tables = new Map<string, DefinitionTable>();
+  private version: string | null = null;
+  private db: Database.Database | null = null;
+  private tableNames = new Set<string>();
 
   constructor(api: DestinyAPI, config: BungieConfig, locale = 'en') {
     this.api = api;
@@ -36,109 +31,114 @@ export class ManifestManager {
     this.rootDir = path.join(config.dataDir!, 'manifest');
   }
 
-  // -- Version / metadata -------------------------------------------------
+  // -- Lifecycle ----------------------------------------------------------
 
-  /** Resolve the current manifest version + per-table paths, caching the meta. */
-  async ensure(forceRefresh = false): Promise<ManifestMeta> {
-    if (this.meta && !forceRefresh) return this.meta;
-
+  /** Ensure the SQLite DB for the current manifest version is open. */
+  async ensure(forceRefresh = false): Promise<void> {
     const manifest = await this.api.getManifest();
     const resp = manifest.Response;
     const version: string = resp.version;
-    const componentPaths: Record<string, string> =
-      resp.jsonWorldComponentContentPaths?.[this.locale] ?? {};
-
-    if (!componentPaths || Object.keys(componentPaths).length === 0) {
-      throw new Error(`No manifest component paths for locale "${this.locale}".`);
+    const dbPath: string | undefined = resp.mobileWorldContentPaths?.[this.locale];
+    if (!dbPath) {
+      throw new Error(`No mobileWorldContentPaths for locale "${this.locale}".`);
     }
 
-    this.meta = { version, componentPaths };
+    if (!forceRefresh && this.db && this.version === version) return;
 
-    // Prune stale versions so the cache directory doesn't grow unbounded.
-    if (forceRefresh) this.tables.clear();
+    const localPath = path.join(this.rootDir, version, 'world.content');
+    if (forceRefresh || !fs.existsSync(localPath)) {
+      await this.download(dbPath, localPath);
+    }
+
+    this.openDb(localPath, version);
     this.pruneOldVersions(version);
-    return this.meta;
+  }
+
+  private async download(relPath: string, localPath: string): Promise<void> {
+    const { data } = await axios.get<ArrayBuffer>(`${BUNGIE_HOST}${relPath}`, {
+      responseType: 'arraybuffer',
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    // The manifest path points at a .zip containing a single SQLite file.
+    const zip = new AdmZip(Buffer.from(data));
+    const entries = zip.getEntries();
+    if (entries.length === 0) throw new Error('Manifest archive was empty.');
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    fs.writeFileSync(localPath, entries[0].getData());
+  }
+
+  private openDb(localPath: string, version: string): void {
+    this.db?.close();
+    this.db = new Database(localPath, { readonly: true, fileMustExist: true });
+    this.version = version;
+    this.tableNames = new Set(
+      this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all()
+        .map((r: any) => r.name as string)
+    );
+  }
+
+  private requireDb(): Database.Database {
+    if (!this.db) throw new Error('Manifest not initialized.');
+    return this.db;
+  }
+
+  /** Validate a table name before interpolating it into SQL. */
+  private assertTable(table: string): void {
+    if (!this.tableNames.has(table)) {
+      throw new Error(
+        `Unknown manifest table "${table}". Use manifest_list_tables to see valid names.`
+      );
+    }
   }
 
   getVersion(): string | null {
-    return this.meta?.version ?? null;
+    return this.version;
   }
 
-  // -- Table loading ------------------------------------------------------
+  // -- Lookups ------------------------------------------------------------
 
-  private versionDir(version: string): string {
-    return path.join(this.rootDir, version);
+  async getDefinition(table: string, hash: number | string): Promise<any | null> {
+    await this.ensure();
+    this.assertTable(table);
+    const row = this.requireDb()
+      .prepare(`SELECT json FROM ${table} WHERE id = ?`)
+      .get(toSignedId(hash)) as { json: string } | undefined;
+    return row ? JSON.parse(row.json) : null;
   }
 
-  private async loadTable(tableName: string): Promise<DefinitionTable> {
-    const cached = this.tables.get(tableName);
-    if (cached) return cached;
-
-    const meta = await this.ensure();
-    const relPath = meta.componentPaths[tableName];
-    if (!relPath) {
-      throw new Error(
-        `Unknown manifest table "${tableName}". Examples: DestinyInventoryItemDefinition, DestinyActivityDefinition.`
-      );
-    }
-
-    const diskPath = path.join(this.versionDir(meta.version), `${tableName}.json`);
-    let table: DefinitionTable;
-
-    if (fs.existsSync(diskPath)) {
-      table = JSON.parse(fs.readFileSync(diskPath, 'utf-8'));
-    } else {
-      const { data } = await axios.get<DefinitionTable>(`${BUNGIE_HOST}${relPath}`, {
-        // Tables can be tens of MB; allow large payloads.
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-      });
-      table = data;
-      fs.mkdirSync(path.dirname(diskPath), { recursive: true });
-      fs.writeFileSync(diskPath, JSON.stringify(table));
-    }
-
-    this.tables.set(tableName, table);
-    return table;
-  }
-
-  // -- Public lookups -----------------------------------------------------
-
-  /** Resolve a single definition by table + hash (handles signed/unsigned). */
-  async getDefinition(tableName: string, hash: number | string): Promise<any | null> {
-    const table = await this.loadTable(tableName);
-    const key = String(hash);
-    if (key in table) return table[key];
-    // Bungie hashes are unsigned 32-bit; callers sometimes pass the signed form.
-    const n = Number(hash);
-    if (Number.isFinite(n)) {
-      const unsigned = String(n >>> 0);
-      if (unsigned in table) return table[unsigned];
-    }
-    return null;
-  }
-
-  /** Resolve many hashes from one table in a single load. */
   async getDefinitions(
-    tableName: string,
+    table: string,
     hashes: Array<number | string>
   ): Promise<Record<string, any>> {
-    const table = await this.loadTable(tableName);
+    await this.ensure();
+    this.assertTable(table);
+    const stmt = this.requireDb().prepare(`SELECT json FROM ${table} WHERE id = ?`);
     const out: Record<string, any> = {};
     for (const h of hashes) {
-      const key = String(h);
-      out[key] = table[key] ?? table[String(Number(h) >>> 0)] ?? null;
+      const row = stmt.get(toSignedId(h)) as { json: string } | undefined;
+      out[String(h)] = row ? JSON.parse(row.json) : null;
     }
     return out;
   }
 
-  /** Case-insensitive substring search over `displayProperties.name`. */
-  async searchByName(tableName: string, query: string, limit = 25): Promise<any[]> {
-    const table = await this.loadTable(tableName);
+  /**
+   * Case-insensitive substring search over `displayProperties.name`. Uses a
+   * SQL `LIKE` prefilter so only candidate rows are parsed in JS.
+   */
+  async searchByName(table: string, query: string, limit = 25): Promise<any[]> {
+    await this.ensure();
+    this.assertTable(table);
+    const rows = this.requireDb()
+      .prepare(`SELECT json FROM ${table} WHERE json LIKE ? LIMIT 5000`)
+      .all(`%${query}%`) as Array<{ json: string }>;
+
     const needle = query.toLowerCase();
     const results: any[] = [];
-    for (const key of Object.keys(table)) {
-      const def = table[key];
+    for (const row of rows) {
+      const def = JSON.parse(row.json);
       const name: string | undefined = def?.displayProperties?.name;
       if (name && name.toLowerCase().includes(needle)) {
         results.push(def);
@@ -148,10 +148,9 @@ export class ManifestManager {
     return results;
   }
 
-  /** List the table names available in the current manifest. */
   async listTables(): Promise<string[]> {
-    const meta = await this.ensure();
-    return Object.keys(meta.componentPaths).sort();
+    await this.ensure();
+    return [...this.tableNames].sort();
   }
 
   // -- Cache hygiene ------------------------------------------------------
@@ -168,4 +167,10 @@ export class ManifestManager {
       /* best-effort cleanup */
     }
   }
+}
+
+/** Reinterpret an unsigned Destiny hash as the signed 32-bit id used as the PK. */
+function toSignedId(hash: number | string): number {
+  const n = Number(hash) >>> 0;
+  return n > 0x7fffffff ? n - 0x100000000 : n;
 }
