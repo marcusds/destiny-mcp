@@ -1,0 +1,19 @@
+services:
+  d2-mcp:
+    build: .
+    image: d2-mcp
+    container_name: d2-mcp
+    restart: unless-stopped
+    # Credentials come from .env (BUNGIE_API_KEY, BUNGIE_CLIENT_ID, ...)
+    env_file: .env
+    environment:
+      D2_MCP_DATA_DIR: /data
+    ports:
+      # Host port is configurable: set D2_MCP_PORT to avoid collisions.
+      - "${D2_MCP_PORT:-3000}:3000" # WebSocket MCP transport
+    volumes:
+      - d2-data:/data # tokens.json + SQLite manifest cache (~350MB)
+    command: ["node", "dist/index.js", "websocket", "--port", "3000"]
+
+volumes:
+  d2-data:

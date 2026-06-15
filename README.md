@@ -70,6 +70,34 @@ npm run start:websocket -- --port 3001
 }
 ```
 
+## Docker
+
+The image runs the **WebSocket** transport (the natural fit for a long-running container).
+Stdio clients that spawn the binary should use the `node dist/index.js stdio` invocation above instead.
+
+```bash
+cp .env.example .env       # fill in BUNGIE_API_KEY (+ OAuth vars)
+docker compose up -d --build
+# server is now on ws://localhost:3000
+```
+
+- **Port:** override the host port with `D2_MCP_PORT=3737 docker compose up -d` if 3000 is taken.
+- **Persistence:** tokens + the ~350 MB SQLite manifest cache live in the named volume `d2-data`
+  (mounted at `/data`), so they survive restarts and image rebuilds.
+- **Credentials** are read from `.env` via `env_file` — they are never baked into the image
+  (`.env` is in `.dockerignore`).
+
+### OAuth inside Docker
+
+Run the interactive login as a one-off; tokens are written into the shared `d2-data` volume, so the
+running service picks them up on its next request:
+
+```bash
+docker compose run --rm -p 7777:7777 d2-mcp node dist/index.js auth
+```
+
+Open the printed URL, approve, and paste the redirected URL back at the prompt (see below).
+
 ## Authentication (for write actions)
 
 Public reads need only `BUNGIE_API_KEY`. The authenticated tools require a one-time OAuth login:
