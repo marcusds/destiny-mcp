@@ -81,6 +81,9 @@ docker compose up -d --build
 # server is now on ws://localhost:3000
 ```
 
+- **Binding:** the port is published on **`127.0.0.1` only** by default. The WebSocket transport has
+  no authentication and stored OAuth tokens permit account writes, so it is not exposed to the network
+  unless you opt in with `D2_MCP_BIND=0.0.0.0` (put it behind your own auth/proxy if you do).
 - **Port:** override the host port with `D2_MCP_PORT=3737 docker compose up -d` if 3000 is taken.
 - **Persistence:** tokens + the ~350 MB SQLite manifest cache live in the named volume `d2-data`
   (mounted at `/data`), so they survive restarts and image rebuilds.
