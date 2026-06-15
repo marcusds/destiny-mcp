@@ -1,4 +1,4 @@
-import { ToolDef, tool, num, str } from './registry.js';
+import { ToolDef, tool, num, str, numArr } from './registry.js';
 
 /** Manifest tools: pointer, local hash resolution, and name search via cache. */
 export const manifestTools: ToolDef[] = [
@@ -27,20 +27,25 @@ export const manifestTools: ToolDef[] = [
 
   tool(
     'manifest_lookup',
-    'Resolve a definition hash from the locally cached manifest (fast, no per-call API request)',
+    'Resolve one or many definition hashes from the local SQLite cache in a single call (pass `hashes` to batch — one round trip instead of N)',
     {
       properties: {
         table: str('Definition table (e.g. DestinyInventoryItemDefinition)'),
-        hash: num('Definition hash to resolve'),
+        hash: num('A single definition hash to resolve'),
+        hashes: numArr('Multiple definition hashes to resolve at once'),
       },
-      required: ['table', 'hash'],
+      required: ['table'],
     },
     async (ctx, a) => {
-      const def = await ctx.manifest.getDefinition(a.table as string, a.hash as number);
-      if (def === null) {
-        return { found: false, table: a.table, hash: a.hash };
+      const table = a.table as string;
+      if (Array.isArray(a.hashes) && a.hashes.length > 0) {
+        return ctx.manifest.getDefinitions(table, a.hashes as number[]);
       }
-      return def;
+      if (a.hash !== undefined) {
+        const def = await ctx.manifest.getDefinition(table, a.hash as number);
+        return def ?? { found: false, table, hash: a.hash };
+      }
+      throw new Error('Provide `hash` (single) or `hashes` (array).');
     }
   ),
 

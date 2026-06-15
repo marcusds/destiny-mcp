@@ -13,6 +13,7 @@ import { WebSocketServer } from 'ws';
 import { DestinyAPI } from './destiny-api.js';
 import { BungieAuth } from './auth.js';
 import { ManifestManager } from './manifest.js';
+import { InventoryCache } from './inventory.js';
 import { WebSocketServerTransport } from './websocket-transport.js';
 import { loadConfig } from './config.js';
 import { allTools, toolMap, ToolContext } from './tools/index.js';
@@ -22,7 +23,8 @@ export function buildContext(): ToolContext {
   const auth = new BungieAuth(config);
   const api = new DestinyAPI(config, auth);
   const manifest = new ManifestManager(api, config);
-  return { api, auth, manifest };
+  const inventory = new InventoryCache(api, manifest, auth, config);
+  return { api, auth, manifest, inventory };
 }
 
 export function createMCPServer(ctx: ToolContext = buildContext()) {
@@ -55,7 +57,9 @@ function errorResult(message: string) {
 }
 
 export async function runStdioServer() {
-  const server = createMCPServer();
+  const ctx = buildContext();
+  ctx.inventory.startAutoRefresh();
+  const server = createMCPServer(ctx);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`d2-mcp running on stdio (${allTools.length} tools)`);
@@ -71,6 +75,7 @@ export async function runStdioServer() {
  */
 export async function runHttpServer(port = 3000) {
   const ctx = buildContext();
+  ctx.inventory.startAutoRefresh();
   const authToken = process.env.D2_MCP_AUTH_TOKEN || undefined;
 
   // Streamable HTTP keeps one transport per initialized session.

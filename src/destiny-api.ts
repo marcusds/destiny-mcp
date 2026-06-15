@@ -110,6 +110,17 @@ export class DestinyAPI {
     });
   }
 
+  /**
+   * Minimal component set for an inventory snapshot: characters (200),
+   * profile/vault inventory (102), character inventories (201), equipment (205).
+   * Auth-aware so a logged-in user's full private inventory resolves.
+   */
+  getInventoryProfile(membershipType: number, membershipId: string) {
+    return this.makeReadRequest(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
+      components: '200,102,201,205',
+    });
+  }
+
   getCharacter(
     membershipType: number,
     membershipId: string,

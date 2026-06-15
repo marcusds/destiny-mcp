@@ -7,10 +7,12 @@ import { actionTools } from './actions.js';
 import { manifestTools } from './manifest.js';
 import { authTools } from './auth.js';
 import { socialTools } from './social.js';
+import { inventoryTools } from './inventory.js';
 
 /** The full set of tools exposed by the server. */
 export const allTools: ToolDef[] = [
   ...readTools,
+  ...inventoryTools,
   ...statsTools,
   ...userTools,
   ...clanTools,

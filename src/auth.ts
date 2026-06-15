@@ -67,12 +67,20 @@ export class BungieAuth {
 
   // -- State -------------------------------------------------------------
 
+  /** Re-read tokens from disk if we don't have them in memory yet. Lets a
+   * long-running process pick up a login performed by a separate `auth` run. */
+  private ensureLoaded(): void {
+    if (!this.tokens) this.loadTokens();
+  }
+
   isAuthenticated(): boolean {
+    this.ensureLoaded();
     return this.tokens !== null;
   }
 
   /** Membership id of the authenticated Bungie.net account, if any. */
   getMembershipId(): string | null {
+    this.ensureLoaded();
     return this.tokens?.membershipId ?? null;
   }
 
@@ -151,6 +159,7 @@ export class BungieAuth {
    * Throws a clear, actionable error if the user has never authenticated.
    */
   async getValidAccessToken(): Promise<string> {
+    this.ensureLoaded();
     if (!this.tokens) {
       throw new Error('Not authenticated. Run `d2-mcp auth` (or the `authenticate` tool) first.');
     }
@@ -166,6 +175,7 @@ export class BungieAuth {
    * (e.g. a private profile returns more data when a token is attached).
    */
   async getAccessTokenIfAuthed(): Promise<string | null> {
+    this.ensureLoaded();
     if (!this.tokens) return null;
     try {
       if (this.accessTokenExpired()) await this.refresh();

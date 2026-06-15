@@ -1,9 +1,9 @@
 # d2-mcp — Destiny 2 MCP Server
 
 A comprehensive [Model Context Protocol](https://modelcontextprotocol.io) server for the
-[Bungie.net Destiny 2 API](https://bungie-net.github.io/multi/index.html). It exposes **79 tools**
-spanning public reads, authenticated write actions, clan management, friends, and a
-local manifest cache.
+[Bungie.net Destiny 2 API](https://bungie-net.github.io/multi/index.html). It exposes **81 tools**
+spanning public reads, authenticated write actions, clan management, friends, a server-side inventory
+cache, and a local manifest database.
 
 > Forked from [`DevNvll/destiny-mcp`](https://github.com/DevNvll/destiny-mcp) (MIT) and extended with
 > a hardened OAuth flow, write actions, clan management, user lookups, and an on-disk manifest cache.
@@ -13,6 +13,7 @@ local manifest cache.
 | Category                  | Tools                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Profiles & items**      | `get_destiny_profile`, `get_destiny_character`, `get_destiny_item`, `get_linked_profiles`                                                                                                                                                                                                                                                           |
+| **Inventory (cached)**    | `get_inventory_summary`, `reload_inventory`                                                                                                                                                                                                                                                                                                         |
 | **Player search**         | `search_destiny_player`, `search_destiny_player_by_bungie_name`, `search_by_global_name`                                                                                                                                                                                                                                                            |
 | **Stats**                 | `get_activity_history`, `get_historical_stats`, `get_historical_stats_for_account`, `get_aggregate_activity_stats`, `get_unique_weapon_history`, `get_leaderboards`, `get_leaderboards_for_character`, `get_clan_leaderboards`, `get_clan_aggregate_stats`, `get_historical_stats_definition`, `get_post_game_carnage_report`, `report_pgcr_player` |
 | **Public game data**      | `get_public_milestones`, `get_public_milestone_content`, `get_public_vendors`                                                                                                                                                                                                                                                                       |
@@ -143,6 +144,21 @@ re-downloads and prunes the old cache. The full DB is ~350 MB on disk.
 - `manifest_search` — find definitions by name (e.g. search `DestinyInventoryItemDefinition` for a weapon)
 - `manifest_list_tables` — list available definition tables
 - `get_destiny_entity_definition` — fetch one definition directly from the API (no cache)
+- `manifest_lookup` accepts `hashes: [...]` to resolve many hashes in a single call
+
+## Inventory cache
+
+To avoid re-fetching (and re-resolving) a full profile on every question, the server keeps a
+**flattened, name-resolved inventory snapshot** per membership:
+
+- `get_inventory_summary` returns compact rows (`name`, `itemType`, `tier`, `location`, `character`,
+  `quantity`, `instanceId`, `hash`) with filtering (`location` / `itemType` / `tier` / `nameContains`)
+  and pagination (`limit` / `offset`). Omit the membership to use your authenticated account.
+- The authenticated account's primary membership is **auto-refreshed hourly** (configurable via
+  `D2_MCP_INVENTORY_REFRESH_MINUTES`); reads hit the cached snapshot, so they're instant and don't
+  hammer Bungie. The auto-refresh only runs once you've completed `d2-mcp auth`.
+- `reload_inventory` (or `get_inventory_summary refresh=true`) forces an immediate live pull.
+- Snapshots persist to `~/.d2-mcp/inventory/` so restarts are warm.
 
 ## Coverage & caveats
 

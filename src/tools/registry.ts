@@ -2,12 +2,14 @@ import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { DestinyAPI } from '../destiny-api.js';
 import { BungieAuth } from '../auth.js';
 import { ManifestManager } from '../manifest.js';
+import { InventoryCache } from '../inventory.js';
 
 /** Shared services handed to every tool handler. */
 export interface ToolContext {
   api: DestinyAPI;
   auth: BungieAuth;
   manifest: ManifestManager;
+  inventory: InventoryCache;
 }
 
 export type ToolArgs = Record<string, unknown>;

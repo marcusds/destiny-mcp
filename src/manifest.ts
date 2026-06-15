@@ -8,6 +8,15 @@ import { DestinyAPI } from './destiny-api.js';
 
 const BUNGIE_HOST = 'https://www.bungie.net';
 
+/** Compact, display-ready item info resolved from the manifest. */
+export interface ResolvedItem {
+  name: string;
+  itemType: string;
+  tier: string;
+  itemTypeEnum: number;
+  tierEnum: number;
+}
+
 /**
  * Local Destiny 2 manifest backed by Bungie's native SQLite database
  * (`mobileWorldContentPaths`). The DB is downloaded + unzipped once per
@@ -120,6 +129,27 @@ export class ManifestManager {
     for (const h of hashes) {
       const row = stmt.get(toSignedId(h)) as { json: string } | undefined;
       out[String(h)] = row ? JSON.parse(row.json) : null;
+    }
+    return out;
+  }
+
+  /**
+   * Resolve many item hashes to compact, display-ready info in one pass.
+   * Used by name-resolving tools so callers never see raw hashes.
+   */
+  async resolveItems(hashes: Array<number | string>): Promise<Record<string, ResolvedItem | null>> {
+    const defs = await this.getDefinitions('DestinyInventoryItemDefinition', hashes);
+    const out: Record<string, ResolvedItem | null> = {};
+    for (const [hash, def] of Object.entries(defs)) {
+      out[hash] = def
+        ? {
+            name: def.displayProperties?.name ?? '',
+            itemType: def.itemTypeDisplayName ?? '',
+            tier: def.inventory?.tierTypeName ?? '',
+            itemTypeEnum: def.itemType ?? 0,
+            tierEnum: def.inventory?.tierType ?? 0,
+          }
+        : null;
     }
     return out;
   }
