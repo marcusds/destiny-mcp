@@ -10,25 +10,25 @@ export class RateLimiter {
 
   async checkLimit(): Promise<void> {
     const now = Date.now();
-    
-    this.requests = this.requests.filter(time => now - time < this.windowMs);
-    
+
+    this.requests = this.requests.filter((time) => now - time < this.windowMs);
+
     if (this.requests.length >= this.maxRequests) {
       const oldestRequest = Math.min(...this.requests);
       const waitTime = this.windowMs - (now - oldestRequest);
-      
+
       if (waitTime > 0) {
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
         return this.checkLimit();
       }
     }
-    
+
     this.requests.push(now);
   }
 
   getRemainingRequests(): number {
     const now = Date.now();
-    this.requests = this.requests.filter(time => now - time < this.windowMs);
+    this.requests = this.requests.filter((time) => now - time < this.windowMs);
     return Math.max(0, this.maxRequests - this.requests.length);
   }
 

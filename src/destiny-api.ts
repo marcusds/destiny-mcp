@@ -1,223 +1,751 @@
 import axios, { AxiosInstance } from 'axios';
-import { BungieConfig, DestinyProfile, DestinyCharacter, DestinyItem } from './types.js';
+import { BungieConfig } from './types.js';
 import { RateLimiter } from './rate-limiter.js';
+import { BungieAuth } from './auth.js';
 
+/**
+ * Thin, typed wrapper over the Bungie.net Platform API.
+ *
+ * Two request paths share rate limiting and error handling:
+ *   - makePublicRequest:  X-API-Key only (public reads)
+ *   - makeAuthRequest:     X-API-Key + Bearer token (authenticated reads/writes)
+ */
 export class DestinyAPI {
   private client: AxiosInstance;
   private config: BungieConfig;
   private rateLimiter: RateLimiter;
+  private auth: BungieAuth;
 
-  constructor(config: BungieConfig) {
+  constructor(config: BungieConfig, auth: BungieAuth) {
     this.config = config;
+    this.auth = auth;
     this.rateLimiter = new RateLimiter(25, 10000);
     this.client = axios.create({
       baseURL: config.baseUrl || 'https://www.bungie.net/Platform',
-      headers: {
-        'X-API-Key': config.apiKey
-      }
+      headers: { 'X-API-Key': config.apiKey },
     });
   }
 
-  private async makePublicRequest(url: string, params?: any) {
+  // -- Core request plumbing ----------------------------------------------
+
+  private async makePublicRequest(url: string, params?: any): Promise<any> {
+    return this.request('get', url, { params });
+  }
+
+  /**
+   * GET that opportunistically attaches a Bearer token when authenticated.
+   * Public profiles work without it; private profiles / a user's own full
+   * inventory return more data when a token is present.
+   */
+  private async makeReadRequest(url: string, params?: any): Promise<any> {
+    const token = await this.auth.getAccessTokenIfAuthed();
+    const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+    return this.request('get', url, { params, headers });
+  }
+
+  /** Authenticated GET/POST. Injects a fresh Bearer token, refreshing if needed. */
+  private async makeAuthRequest(
+    method: 'get' | 'post',
+    url: string,
+    opts: { params?: any; data?: any } = {}
+  ): Promise<any> {
+    const token = await this.auth.getValidAccessToken();
+    return this.request(method, url, {
+      ...opts,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  }
+
+  private async request(
+    method: 'get' | 'post',
+    url: string,
+    opts: { params?: any; data?: any; headers?: Record<string, string> } = {}
+  ): Promise<any> {
     await this.rateLimiter.checkLimit();
-
     try {
-      const response = await this.client.get(url, { params });
+      const response = await this.client.request({
+        method,
+        url,
+        params: opts.params,
+        data: opts.data,
+        headers: opts.headers,
+      });
 
-      if (response.data.ErrorCode !== 1) {
-        throw new Error(`Bungie API Error: ${response.data.Message}`);
+      if (response.data?.ErrorCode !== undefined && response.data.ErrorCode !== 1) {
+        throw new Error(
+          `Bungie API Error ${response.data.ErrorCode} (${response.data.ErrorStatus}): ${response.data.Message}`
+        );
       }
-
       return response.data;
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
+        const apiMsg = (error.response?.data as any)?.Message;
+        if (status === 401) {
+          throw new Error('Unauthorized — token invalid/expired. Re-run `d2-mcp auth`.');
+        }
         if (status === 429) {
-          throw new Error('Rate limit exceeded. Please wait before making more requests.');
-        } else if (status && status >= 500) {
+          throw new Error('Rate limit exceeded. Please wait before retrying.');
+        }
+        if (status && status >= 500) {
           throw new Error('Bungie API server error. Please try again later.');
         }
+        if (apiMsg) throw new Error(`Bungie API Error: ${apiMsg}`);
       }
       throw error;
     }
   }
 
-  async getProfile(
-    membershipType: number, 
-    membershipId: string, 
-    components: number[] = [100, 200]
-  ): Promise<DestinyProfile> {
-    const componentsString = components.join(',');
-    return this.makePublicRequest(
-      `/Destiny2/${membershipType}/Profile/${membershipId}/`,
-      { components: componentsString }
-    );
+  private static components(components: number[]): string {
+    return components.join(',');
   }
 
-  async getCharacter(
+  // =======================================================================
+  // PUBLIC READS
+  // =======================================================================
+
+  getProfile(membershipType: number, membershipId: string, components: number[] = [100, 200]) {
+    return this.makeReadRequest(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
+      components: DestinyAPI.components(components),
+    });
+  }
+
+  getCharacter(
     membershipType: number,
     membershipId: string,
     characterId: string,
     components: number[] = [200]
-  ): Promise<any> {
-    const componentsString = components.join(',');
-    return this.makePublicRequest(
+  ) {
+    return this.makeReadRequest(
       `/Destiny2/${membershipType}/Profile/${membershipId}/Character/${characterId}/`,
-      { components: componentsString }
+      { components: DestinyAPI.components(components) }
     );
   }
 
-  async getItem(
+  getItem(
     membershipType: number,
     membershipId: string,
     itemInstanceId: string,
-    components: number[] = [300]
-  ): Promise<any> {
-    const componentsString = components.join(',');
-    return this.makePublicRequest(
+    components: number[] = [300, 302, 304, 305]
+  ) {
+    return this.makeReadRequest(
       `/Destiny2/${membershipType}/Profile/${membershipId}/Item/${itemInstanceId}/`,
-      { components: componentsString }
+      { components: DestinyAPI.components(components) }
     );
   }
 
-  async searchDestinyPlayer(membershipType: number, displayName: string): Promise<any> {
+  searchDestinyPlayer(membershipType: number, displayName: string) {
     return this.makePublicRequest(
       `/Destiny2/SearchDestinyPlayer/${membershipType}/${encodeURIComponent(displayName)}/`
     );
   }
 
-  async getLinkedProfiles(membershipType: number, membershipId: string): Promise<any> {
+  searchDestinyPlayerByBungieName(
+    membershipType: number,
+    displayName: string,
+    displayNameCode: number
+  ) {
+    return this.request('post', `/Destiny2/SearchDestinyPlayerByBungieName/${membershipType}/`, {
+      data: { displayName, displayNameCode },
+    });
+  }
+
+  getLinkedProfiles(membershipType: number, membershipId: string, getAllMemberships = true) {
     return this.makePublicRequest(
-      `/Destiny2/${membershipType}/Profile/${membershipId}/LinkedProfiles/`
+      `/Destiny2/${membershipType}/Profile/${membershipId}/LinkedProfiles/`,
+      { getAllMemberships }
     );
   }
 
-  async getActivityHistory(
+  getActivityHistory(
     membershipType: number,
     membershipId: string,
     characterId: string,
-    count: number = 25,
+    count = 25,
     mode?: number,
     page?: number
-  ): Promise<any> {
+  ) {
     const params: any = { count };
     if (mode !== undefined) params.mode = mode;
     if (page !== undefined) params.page = page;
-
     return this.makePublicRequest(
       `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/Activities/`,
       params
     );
   }
 
-  async getManifest(): Promise<any> {
-    return this.makePublicRequest('/Destiny2/Manifest/');
-  }
-
-  async getDestinyEntityDefinition(
-    entityType: string,
-    hashIdentifier: number
-  ): Promise<any> {
-    return this.makePublicRequest(
-      `/Destiny2/Manifest/${entityType}/${hashIdentifier}/`
-    );
-  }
-
-  async getPublicMilestones(): Promise<any> {
-    return this.makePublicRequest('/Destiny2/Milestones/');
-  }
-
-  async getPublicMilestoneContent(milestoneHash: number): Promise<any> {
-    return this.makePublicRequest(`/Destiny2/Milestones/${milestoneHash}/Content/`);
-  }
-
-  async getPublicVendors(components: number[] = [400, 401, 402]): Promise<any> {
-    const componentsString = components.join(',');
-    return this.makePublicRequest('/Destiny2/Vendors/', { components: componentsString });
-  }
-
-  async getHistoricalStats(
+  getHistoricalStats(
     membershipType: number,
     membershipId: string,
     characterId: string,
     periodType?: number,
     modes?: number[],
     groups?: number[]
-  ): Promise<any> {
+  ) {
     const params: any = {};
     if (periodType !== undefined) params.periodType = periodType;
     if (modes?.length) params.modes = modes.join(',');
     if (groups?.length) params.groups = groups.join(',');
-
     return this.makePublicRequest(
       `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/`,
       params
     );
   }
 
-  async getLeaderboards(
+  /** Account-wide historical stats (merged across characters). */
+  getHistoricalStatsForAccount(membershipType: number, membershipId: string, groups?: number[]) {
+    const params: any = {};
+    if (groups?.length) params.groups = groups.join(',');
+    return this.makePublicRequest(
+      `/Destiny2/${membershipType}/Account/${membershipId}/Stats/`,
+      params
+    );
+  }
+
+  getDestinyAggregateActivityStats(
+    membershipType: number,
+    membershipId: string,
+    characterId: string
+  ) {
+    return this.makePublicRequest(
+      `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/AggregateActivityStats/`
+    );
+  }
+
+  getUniqueWeaponHistory(membershipType: number, membershipId: string, characterId: string) {
+    return this.makePublicRequest(
+      `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/UniqueWeapons/`
+    );
+  }
+
+  getLeaderboards(
     membershipType: number,
     membershipId: string,
     maxtop?: number,
     modes?: string,
     statid?: string
-  ): Promise<any> {
+  ) {
     const params: any = {};
     if (maxtop !== undefined) params.maxtop = maxtop;
     if (modes) params.modes = modes;
     if (statid) params.statid = statid;
-
     return this.makePublicRequest(
       `/Destiny2/Stats/Leaderboards/${membershipType}/${membershipId}/`,
       params
     );
   }
 
-  async searchDestinyPlayerByBungieName(
-    membershipType: number,
-    displayName: string,
-    displayNameCode: number
-  ): Promise<any> {
+  getPostGameCarnageReport(activityId: string) {
+    return this.makePublicRequest(`/Destiny2/Stats/PostGameCarnageReport/${activityId}/`);
+  }
+
+  getManifest() {
+    return this.makePublicRequest('/Destiny2/Manifest/');
+  }
+
+  getDestinyEntityDefinition(entityType: string, hashIdentifier: number) {
+    return this.makePublicRequest(`/Destiny2/Manifest/${entityType}/${hashIdentifier}/`);
+  }
+
+  getPublicMilestones() {
+    return this.makePublicRequest('/Destiny2/Milestones/');
+  }
+
+  getPublicMilestoneContent(milestoneHash: number) {
+    return this.makePublicRequest(`/Destiny2/Milestones/${milestoneHash}/Content/`);
+  }
+
+  getPublicVendors(components: number[] = [400, 401, 402]) {
+    return this.makePublicRequest('/Destiny2/Vendors/', {
+      components: DestinyAPI.components(components),
+    });
+  }
+
+  // =======================================================================
+  // USER
+  // =======================================================================
+
+  getBungieNetUserById(membershipId: string) {
+    return this.makePublicRequest(`/User/GetBungieNetUserById/${membershipId}/`);
+  }
+
+  getMembershipDataById(membershipId: string, membershipType: number) {
+    return this.makePublicRequest(`/User/GetMembershipsById/${membershipId}/${membershipType}/`);
+  }
+
+  /** Resolve players by Bungie name prefix (paged). */
+  searchByGlobalNamePrefix(displayNamePrefix: string, page = 0) {
+    return this.request('post', `/User/Search/GlobalName/${page}/`, {
+      data: { displayNamePrefix },
+    });
+  }
+
+  // =======================================================================
+  // CLANS (GroupV2) — public reads
+  // =======================================================================
+
+  getGroup(groupId: string) {
+    return this.makePublicRequest(`/GroupV2/${groupId}/`);
+  }
+
+  getGroupByName(groupName: string, groupType = 1) {
+    return this.makePublicRequest(`/GroupV2/Name/${encodeURIComponent(groupName)}/${groupType}/`);
+  }
+
+  getMembersOfGroup(groupId: string, currentpage = 1, memberType?: number, nameSearch?: string) {
+    const params: any = { currentpage: Math.max(1, Math.floor(currentpage) || 1) };
+    if (memberType !== undefined) params.memberType = memberType;
+    if (nameSearch) params.nameSearch = nameSearch;
+    return this.makePublicRequest(`/GroupV2/${groupId}/Members/`, params);
+  }
+
+  getAdminsAndFounderOfGroup(groupId: string, currentpage = 1) {
+    return this.makePublicRequest(`/GroupV2/${groupId}/AdminsAndFounder/`, { currentpage });
+  }
+
+  getGroupsForMember(membershipType: number, membershipId: string, filter = 0, groupType = 1) {
     return this.makePublicRequest(
-      `/Destiny2/SearchDestinyPlayerByBungieName/${membershipType}/`,
-      {
-        displayName,
-        displayNameCode
-      }
+      `/GroupV2/User/${membershipType}/${membershipId}/${filter}/${groupType}/`
     );
   }
 
-  async getClanWeeklyRewardState(groupId: string): Promise<any> {
+  getClanWeeklyRewardState(groupId: string) {
     return this.makePublicRequest(`/Destiny2/Clan/${groupId}/WeeklyRewardState/`);
   }
 
-  async getClanBannerSource(): Promise<any> {
+  getClanBannerSource() {
     return this.makePublicRequest('/Destiny2/Clan/ClanBannerDictionary/');
   }
 
-  async getDestinyAggregateActivityStats(
+  // =======================================================================
+  // AUTHENTICATED READS
+  // =======================================================================
+
+  /** Who am I — memberships for the authenticated Bungie.net account. */
+  getMembershipsForCurrentUser() {
+    return this.makeAuthRequest('get', '/User/GetMembershipsForCurrentUser/');
+  }
+
+  /** Live vendor inventories for one of your characters (requires auth). */
+  getVendors(
     membershipType: number,
     membershipId: string,
-    characterId: string
-  ): Promise<any> {
-    return this.makePublicRequest(
-      `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/AggregateActivityStats/`
+    characterId: string,
+    components: number[] = [400, 401, 402]
+  ) {
+    return this.makeAuthRequest(
+      'get',
+      `/Destiny2/${membershipType}/Profile/${membershipId}/Character/${characterId}/Vendors/`,
+      { params: { components: DestinyAPI.components(components) } }
     );
   }
 
-  async getUniqueWeaponHistory(
+  getVendor(
     membershipType: number,
     membershipId: string,
-    characterId: string
-  ): Promise<any> {
-    return this.makePublicRequest(
-      `/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/UniqueWeapons/`
+    characterId: string,
+    vendorHash: number,
+    components: number[] = [400, 401, 402]
+  ) {
+    return this.makeAuthRequest(
+      'get',
+      `/Destiny2/${membershipType}/Profile/${membershipId}/Character/${characterId}/Vendors/${vendorHash}/`,
+      { params: { components: DestinyAPI.components(components) } }
     );
   }
 
-  async getPostGameCarnageReport(activityId: string): Promise<any> {
-    return this.makePublicRequest(
-      `/Destiny2/Stats/PostGameCarnageReport/${activityId}/`
+  getPendingMemberships(groupId: string, currentpage = 1) {
+    return this.makeAuthRequest('get', `/GroupV2/${groupId}/Members/Pending/`, {
+      params: { currentpage },
+    });
+  }
+
+  // =======================================================================
+  // AUTHENTICATED WRITE ACTIONS (Destiny2/Actions)
+  // =======================================================================
+
+  transferItem(args: {
+    itemReferenceHash: number;
+    stackSize: number;
+    transferToVault: boolean;
+    itemId: string;
+    characterId: string;
+    membershipType: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/TransferItem/', { data: args });
+  }
+
+  pullFromPostmaster(args: {
+    itemReferenceHash: number;
+    stackSize: number;
+    itemId: string;
+    characterId: string;
+    membershipType: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/PullFromPostmaster/', {
+      data: args,
+    });
+  }
+
+  equipItem(args: { itemId: string; characterId: string; membershipType: number }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/EquipItem/', { data: args });
+  }
+
+  equipItems(args: { itemIds: string[]; characterId: string; membershipType: number }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/EquipItems/', { data: args });
+  }
+
+  setItemLockState(args: {
+    state: boolean;
+    itemId: string;
+    characterId: string;
+    membershipType: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/SetLockState/', { data: args });
+  }
+
+  setQuestTrackedState(args: {
+    state: boolean;
+    itemId: string;
+    characterId: string;
+    membershipType: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/SetTrackedState/', {
+      data: args,
+    });
+  }
+
+  insertSocketPlugFree(args: {
+    plug: { socketIndex: number; socketArrayType: number; plugItemHash: number };
+    itemId: string;
+    characterId: string;
+    membershipType: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/InsertSocketPlugFree/', {
+      data: args,
+    });
+  }
+
+  equipLoadout(args: { loadoutIndex: number; characterId: string; membershipType: number }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Loadouts/EquipLoadout/', {
+      data: args,
+    });
+  }
+
+  snapshotLoadout(args: {
+    loadoutIndex: number;
+    characterId: string;
+    membershipType: number;
+    colorHash?: number;
+    iconHash?: number;
+    nameHash?: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Loadouts/SnapshotLoadout/', {
+      data: args,
+    });
+  }
+
+  // -- Clan management writes ---------------------------------------------
+
+  inviteMemberToGroup(groupId: string, membershipType: number, membershipId: string, message = '') {
+    return this.makeAuthRequest(
+      'post',
+      `/GroupV2/${groupId}/Members/IndividualInvite/${membershipType}/${membershipId}/`,
+      { data: { message } }
     );
+  }
+
+  kickMember(groupId: string, membershipType: number, membershipId: string) {
+    return this.makeAuthRequest(
+      'post',
+      `/GroupV2/${groupId}/Members/${membershipType}/${membershipId}/Kick/`
+    );
+  }
+
+  banMember(
+    groupId: string,
+    membershipType: number,
+    membershipId: string,
+    comment = '',
+    length = 0
+  ) {
+    return this.makeAuthRequest(
+      'post',
+      `/GroupV2/${groupId}/Members/${membershipType}/${membershipId}/Ban/`,
+      { data: { comment, length } }
+    );
+  }
+
+  unbanMember(groupId: string, membershipType: number, membershipId: string) {
+    return this.makeAuthRequest(
+      'post',
+      `/GroupV2/${groupId}/Members/${membershipType}/${membershipId}/Unban/`
+    );
+  }
+
+  approvePending(groupId: string, membershipType: number, membershipId: string, message = '') {
+    return this.makeAuthRequest(
+      'post',
+      `/GroupV2/${groupId}/Members/Approve/${membershipType}/${membershipId}/`,
+      { data: { message } }
+    );
+  }
+
+  // -- GroupV2: additional reads & admin ----------------------------------
+
+  groupSearch(query: {
+    name: string;
+    groupType?: number;
+    sortBy?: number;
+    itemsPerPage?: number;
+    currentPage?: number;
+    tagText?: string;
+  }) {
+    return this.request('post', '/GroupV2/Search/', {
+      data: { groupType: 1, currentPage: 0, ...query },
+    });
+  }
+
+  editGroup(groupId: string, edits: Record<string, unknown>) {
+    return this.makeAuthRequest('post', `/GroupV2/${groupId}/Edit/`, { data: edits });
+  }
+
+  editClanBanner(groupId: string, banner: Record<string, number>) {
+    return this.makeAuthRequest('post', `/GroupV2/${groupId}/EditClanBanner/`, { data: banner });
+  }
+
+  getBannedMembersOfGroup(groupId: string, currentpage = 1) {
+    return this.makeAuthRequest('get', `/GroupV2/${groupId}/Banned/`, { params: { currentpage } });
+  }
+
+  getInvitedIndividuals(groupId: string, currentpage = 1) {
+    return this.makeAuthRequest('get', `/GroupV2/${groupId}/Members/InvitedIndividuals/`, {
+      params: { currentpage },
+    });
+  }
+
+  approveAllPending(groupId: string, message = '') {
+    return this.makeAuthRequest('post', `/GroupV2/${groupId}/Members/ApproveAll/`, {
+      data: { message },
+    });
+  }
+
+  denyAllPending(groupId: string, message = '') {
+    return this.makeAuthRequest('post', `/GroupV2/${groupId}/Members/DenyAll/`, {
+      data: { message },
+    });
+  }
+
+  getPotentialGroupsForMember(
+    membershipType: number,
+    membershipId: string,
+    filter = 0,
+    groupType = 1
+  ) {
+    return this.makePublicRequest(
+      `/GroupV2/User/Potential/${membershipType}/${membershipId}/${filter}/${groupType}/`
+    );
+  }
+
+  // =======================================================================
+  // SOCIAL / FRIENDS (all require auth except platform friends)
+  // =======================================================================
+
+  getFriendList() {
+    return this.makeAuthRequest('get', '/Social/Friends/');
+  }
+
+  getFriendRequestList() {
+    return this.makeAuthRequest('get', '/Social/Friends/Requests/');
+  }
+
+  issueFriendRequest(membershipId: string) {
+    return this.makeAuthRequest('post', `/Social/Friends/Add/${membershipId}/`);
+  }
+
+  acceptFriendRequest(membershipId: string) {
+    return this.makeAuthRequest('post', `/Social/Friends/Requests/Accept/${membershipId}/`);
+  }
+
+  declineFriendRequest(membershipId: string) {
+    return this.makeAuthRequest('post', `/Social/Friends/Requests/Decline/${membershipId}/`);
+  }
+
+  removeFriend(membershipId: string) {
+    return this.makeAuthRequest('post', `/Social/Friends/Remove/${membershipId}/`);
+  }
+
+  removeFriendRequest(membershipId: string) {
+    return this.makeAuthRequest('post', `/Social/Friends/Requests/Remove/${membershipId}/`);
+  }
+
+  getPlatformFriendList(friendPlatform: number, page = 0) {
+    return this.makePublicRequest(`/Social/PlatformFriends/${friendPlatform}/${page}/`);
+  }
+
+  // =======================================================================
+  // DESTINY2 — niche reads
+  // =======================================================================
+
+  searchDestinyEntities(type: string, searchTerm: string, page = 0) {
+    return this.makePublicRequest(
+      `/Destiny2/Armory/Search/${type}/${encodeURIComponent(searchTerm)}/`,
+      { page }
+    );
+  }
+
+  getCollectibleNodeDetails(
+    membershipType: number,
+    membershipId: string,
+    characterId: string,
+    collectiblePresentationNodeHash: number,
+    components: number[] = [800]
+  ) {
+    return this.makeReadRequest(
+      `/Destiny2/${membershipType}/Profile/${membershipId}/Character/${characterId}/Collectibles/${collectiblePresentationNodeHash}/`,
+      { components: DestinyAPI.components(components) }
+    );
+  }
+
+  getClanLeaderboards(groupId: string, maxtop?: number, modes?: string, statid?: string) {
+    const params: any = {};
+    if (maxtop !== undefined) params.maxtop = maxtop;
+    if (modes) params.modes = modes;
+    if (statid) params.statid = statid;
+    return this.makePublicRequest(`/Destiny2/Stats/Leaderboards/Clans/${groupId}/`, params);
+  }
+
+  getClanAggregateStats(groupId: string, modes?: string) {
+    const params: any = {};
+    if (modes) params.modes = modes;
+    return this.makePublicRequest(`/Destiny2/Stats/AggregateClanStats/${groupId}/`, params);
+  }
+
+  getLeaderboardsForCharacter(
+    membershipType: number,
+    membershipId: string,
+    characterId: string,
+    maxtop?: number,
+    modes?: string,
+    statid?: string
+  ) {
+    const params: any = {};
+    if (maxtop !== undefined) params.maxtop = maxtop;
+    if (modes) params.modes = modes;
+    if (statid) params.statid = statid;
+    return this.makePublicRequest(
+      `/Destiny2/Stats/Leaderboards/${membershipType}/${membershipId}/${characterId}/`,
+      params
+    );
+  }
+
+  getHistoricalStatsDefinition() {
+    return this.makePublicRequest('/Destiny2/Stats/Definition/');
+  }
+
+  reportPostGameCarnageReportPlayer(
+    activityId: string,
+    args: { reasonCategoryHashes: number[]; reasonHashes: number[]; offendingCharacterId: string }
+  ) {
+    return this.makeAuthRequest(
+      'post',
+      `/Destiny2/Stats/PostGameCarnageReport/${activityId}/Report/`,
+      { data: args }
+    );
+  }
+
+  // -- Loadout identifier writes ------------------------------------------
+
+  clearLoadout(args: { loadoutIndex: number; characterId: string; membershipType: number }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Loadouts/ClearLoadout/', { data: args });
+  }
+
+  updateLoadoutIdentifiers(args: {
+    loadoutIndex: number;
+    characterId: string;
+    membershipType: number;
+    colorHash?: number;
+    iconHash?: number;
+    nameHash?: number;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Actions/Loadouts/UpdateLoadoutIdentifiers/', {
+      data: args,
+    });
+  }
+
+  // -- AWA (Advanced Write Actions) — out-of-band approval flow -----------
+
+  awaInitializeRequest(args: {
+    type: number;
+    affectedItemId?: string;
+    membershipType: number;
+    characterId: string;
+  }) {
+    return this.makeAuthRequest('post', '/Destiny2/Awa/Initialize/', { data: args });
+  }
+
+  awaGetActionToken(correlationId: string) {
+    return this.makeAuthRequest('get', `/Destiny2/Awa/GetActionToken/${correlationId}/`);
+  }
+
+  // =======================================================================
+  // FIRETEAM (legacy clan fireteam service — all require auth)
+  // =======================================================================
+
+  getAvailableClanFireteams(
+    groupId: string,
+    platform: number,
+    activityType: number,
+    dateRange: number,
+    slotFilter: number,
+    publicOnly: number,
+    page = 0,
+    langFilter?: string
+  ) {
+    const params: any = {};
+    if (langFilter) params.langFilter = langFilter;
+    return this.makeAuthRequest(
+      'get',
+      `/Fireteam/Clan/${groupId}/Available/${platform}/${activityType}/${dateRange}/${slotFilter}/${publicOnly}/${page}/`,
+      { params }
+    );
+  }
+
+  searchPublicAvailableClanFireteams(
+    platform: number,
+    activityType: number,
+    dateRange: number,
+    slotFilter: number,
+    page = 0,
+    langFilter?: string
+  ) {
+    const params: any = {};
+    if (langFilter) params.langFilter = langFilter;
+    return this.makeAuthRequest(
+      'get',
+      `/Fireteam/Search/Available/${platform}/${activityType}/${dateRange}/${slotFilter}/${page}/`,
+      { params }
+    );
+  }
+
+  getMyClanFireteams(
+    groupId: string,
+    platform: number,
+    includeClosed: boolean,
+    page = 0,
+    groupFilter = false,
+    langFilter?: string
+  ) {
+    const params: any = { groupFilter };
+    if (langFilter) params.langFilter = langFilter;
+    return this.makeAuthRequest(
+      'get',
+      `/Fireteam/Clan/${groupId}/My/${platform}/${includeClosed}/${page}/`,
+      { params }
+    );
+  }
+
+  getClanFireteam(groupId: string, fireteamId: string) {
+    return this.makeAuthRequest('get', `/Fireteam/Clan/${groupId}/Summary/${fireteamId}/`);
   }
 }

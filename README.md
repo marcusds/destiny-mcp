@@ -1,183 +1,149 @@
-# Bungie Destiny MCP Server
+# d2-mcp — Destiny 2 MCP Server
 
-A Model Context Protocol (MCP) server that provides AI access to the Bungie.net Destiny 2 API. This server enables AI assistants to retrieve Destiny 2 game data including player profiles, character information, item details, and activity history.
+A comprehensive [Model Context Protocol](https://modelcontextprotocol.io) server for the
+[Bungie.net Destiny 2 API](https://bungie-net.github.io/multi/index.html). It exposes **83 tools**
+spanning public reads, authenticated write actions, clan management, friends, fireteams, and a
+local manifest cache.
 
-## Features
+> Forked from [`DevNvll/destiny-mcp`](https://github.com/DevNvll/destiny-mcp) (MIT) and extended with
+> a hardened OAuth flow, write actions, clan management, user lookups, and an on-disk manifest cache.
 
-- **OAuth Authentication** - Secure authentication flow with Bungie.net
-- **Comprehensive API Coverage** - Access to key Destiny 2 endpoints
-- **Rate Limiting** - Built-in rate limiting to respect API limits
-- **Error Handling** - Robust error handling for API responses
-- **MCP Protocol** - Full compliance with Model Context Protocol
+## What's included
 
-## Available Tools
+| Category                  | Tools                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Profiles & items**      | `get_destiny_profile`, `get_destiny_character`, `get_destiny_item`, `get_linked_profiles`                                                                                                                                                                                                                                                           |
+| **Player search**         | `search_destiny_player`, `search_destiny_player_by_bungie_name`, `search_by_global_name`                                                                                                                                                                                                                                                            |
+| **Stats**                 | `get_activity_history`, `get_historical_stats`, `get_historical_stats_for_account`, `get_aggregate_activity_stats`, `get_unique_weapon_history`, `get_leaderboards`, `get_leaderboards_for_character`, `get_clan_leaderboards`, `get_clan_aggregate_stats`, `get_historical_stats_definition`, `get_post_game_carnage_report`, `report_pgcr_player` |
+| **Public game data**      | `get_public_milestones`, `get_public_milestone_content`, `get_public_vendors`                                                                                                                                                                                                                                                                       |
+| **Users**                 | `get_bungie_user_by_id`, `get_membership_data_by_id`                                                                                                                                                                                                                                                                                                |
+| **Clans (read)**          | `get_clan`, `get_clan_by_name`, `get_clan_members`, `get_clan_admins`, `get_groups_for_member`, `get_potential_groups_for_member`, `search_clans`, `get_clan_weekly_reward_state`, `get_clan_banner_source`                                                                                                                                         |
+| **Clans (auth/write)**    | `get_clan_pending_members`, `get_clan_banned_members`, `get_clan_invited_individuals`, `invite_clan_member`, `approve_clan_member`, `approve_all_clan_pending`, `deny_all_clan_pending`, `kick_clan_member`, `ban_clan_member`, `unban_clan_member`, `edit_clan`, `edit_clan_banner`                                                                |
+| **Friends (auth)**        | `get_friend_list`, `get_friend_request_list`, `issue_friend_request`, `accept_friend_request`, `decline_friend_request`, `remove_friend`, `remove_friend_request`, `get_platform_friend_list`                                                                                                                                                       |
+| **Fireteams (auth)**      | `get_available_clan_fireteams`, `search_public_clan_fireteams`, `get_my_clan_fireteams`, `get_clan_fireteam`                                                                                                                                                                                                                                        |
+| **Authenticated reads**   | `get_current_user`, `get_character_vendors`, `get_character_vendor`, `get_collectible_node_details`                                                                                                                                                                                                                                                 |
+| **Inventory writes**      | `transfer_item`, `pull_from_postmaster`, `equip_item`, `equip_items`, `set_item_lock_state`, `set_quest_tracked_state`, `insert_socket_plug_free`                                                                                                                                                                                                   |
+| **Loadout writes**        | `equip_loadout`, `snapshot_loadout`, `clear_loadout`, `update_loadout_identifiers`                                                                                                                                                                                                                                                                  |
+| **AWA (advanced writes)** | `awa_initialize_request`, `awa_get_action_token`                                                                                                                                                                                                                                                                                                    |
+| **Manifest**              | `get_destiny_manifest`, `get_destiny_entity_definition`, `manifest_lookup`, `manifest_search`, `manifest_list_tables`, `search_destiny_entities`                                                                                                                                                                                                    |
+| **OAuth**                 | `auth_status`, `get_auth_url`, `submit_auth_code`                                                                                                                                                                                                                                                                                                   |
 
-### Core Player Data
-- `get_destiny_profile` - Get player profile information
-- `get_destiny_character` - Get detailed character information
-- `get_destiny_item` - Get item details and stats
-- `search_destiny_player` - Search for players by display name
-- `search_destiny_player_by_bungie_name` - Search using Bungie Name + discriminator
-- `get_linked_profiles` - Get linked profiles across platforms
-
-### Activity & Statistics
-- `get_activity_history` - Get character activity history
-- `get_post_game_carnage_report` - **Get detailed PGCR with all participants and their stats**
-- `get_historical_stats` - Historical game statistics
-- `get_aggregate_activity_stats` - Aggregate activity statistics
-- `get_unique_weapon_history` - Unique weapon usage history
-- `get_leaderboards` - Player leaderboard data
-
-### Game Data & Definitions
-- `get_destiny_manifest` - Get game manifest and definitions
-- `get_destiny_entity_definition` - Get specific entity definitions (weapons, armor, etc.)
-- `get_public_milestones` - Current weekly/daily milestones
-- `get_public_milestone_content` - Detailed milestone content
-- `get_public_vendors` - Public vendor inventories (Xur, etc.)
-
-### Clan Information
-- `get_clan_weekly_reward_state` - Clan weekly reward status
-- `get_clan_banner_source` - Available clan banner options
-
-**Note:** This server uses public API endpoints that only require an API key - no user authentication needed!
+Tools tagged `[auth]` require an OAuth login; `[write]` tools mutate live game state.
 
 ## Setup
 
-1. **Register Application**
-   - Go to https://www.bungie.net/en/Application
-   - Create a new application (OAuth settings not required for public API)
-   - Note your API Key
+1. **Register an application** at https://www.bungie.net/en/Application.
+   - Copy your **API Key**.
+   - For `[auth]`/`[write]` tools, set the app to **Confidential**, copy the **OAuth client_id** and
+     **client_secret**, and register a redirect URL (e.g. `https://localhost:7777/callback`).
 
-2. **Configure Environment**
+2. **Configure**
    ```bash
-   cp .env.example .env
-   # Edit .env with your API key (only BUNGIE_API_KEY is required)
-   ```
-
-3. **Install Dependencies**
-   ```bash
+   cp .env.example .env   # fill in BUNGIE_API_KEY (+ OAuth vars for auth tools)
    npm install
-   ```
-
-4. **Build**
-   ```bash
    npm run build
    ```
 
-## Running the Server
+## Running
 
-The server supports two modes:
-
-### Stdio Mode (Default)
-For use with Claude Desktop and other MCP clients that communicate via stdin/stdout:
 ```bash
-npm start
-# or explicitly:
-npm run start:stdio
-```
-
-### WebSocket Mode (Remote Server)
-For remote connections over WebSocket:
-```bash
-npm run start:websocket
-# or with custom port:
+npm start                 # stdio mode (default; for Claude Desktop / MCP clients)
+npm run start:websocket   # WebSocket mode on :3000
 npm run start:websocket -- --port 3001
 ```
 
-The WebSocket server will be available at `ws://localhost:3000` (or your specified port).
+### Claude Desktop / MCP client config
 
-## MCP Client Configuration
-
-### Claude Desktop (Stdio Mode)
-Add to your Claude Desktop configuration:
 ```json
 {
   "mcpServers": {
-    "bungie-destiny": {
+    "d2": {
       "command": "node",
-      "args": ["/path/to/bungie-mcp/dist/index.js", "stdio"],
+      "args": ["/path/to/d2-mcp/dist/index.js", "stdio"],
       "env": {
-        "BUNGIE_API_KEY": "your_api_key"
+        "BUNGIE_API_KEY": "your_api_key",
+        "BUNGIE_CLIENT_ID": "your_client_id",
+        "BUNGIE_CLIENT_SECRET": "your_client_secret",
+        "BUNGIE_REDIRECT_URI": "https://localhost:7777/callback"
       }
     }
   }
 }
 ```
 
-### Remote WebSocket Connection
-For remote MCP clients, connect to:
-```
-ws://localhost:3000
-```
+## Authentication (for write actions)
 
-The server will handle multiple concurrent WebSocket connections.
+Public reads need only `BUNGIE_API_KEY`. The authenticated tools require a one-time OAuth login:
 
-## Development
-
-Run in development mode with auto-reload:
 ```bash
-npm run dev           # stdio mode
-npm run dev:websocket # websocket mode
+npm run auth          # prints an authorize URL, captures the callback, stores tokens
 ```
 
-## Usage
+The `auth` command starts a local listener on `BUNGIE_OAUTH_PORT` to capture the redirect, and also
+accepts the code/redirect URL pasted into the terminal as a fallback. Tokens are persisted to
+`~/.d2-mcp/tokens.json` (override with `D2_MCP_DATA_DIR`) and **auto-refresh** — you only log in once.
 
-The server provides access to public Destiny 2 data without requiring user authentication. Simply provide player membership information to retrieve:
+Alternatively, drive it from an agent: call `get_auth_url`, open the URL, then `submit_auth_code`
+with the resulting code or redirect URL. Use `auth_status` to check state, and `npm run logout` /
+the `logout` command to clear tokens.
 
-- Player profiles and statistics
-- Character details and equipment
-- Activity history and achievements
-- **Detailed activity reports with all participants** (Post-Game Carnage Reports)
-- Item information and perks
-- Cross-platform linked accounts
-- Real-time game data (milestones, vendors)
+## Manifest cache
 
-## Getting Activity Participants
+The first call to `manifest_lookup` / `manifest_search` downloads the relevant definition table from
+Bungie and caches it on disk (`~/.d2-mcp/manifest/<version>/`), keyed by manifest version. Subsequent
+lookups are local and instant; a new game version transparently invalidates the cache. This avoids a
+network round-trip per hash and lets you resolve item/activity names offline.
 
-To get detailed information about other players in activities:
+- `manifest_lookup` — resolve a single `{table, hash}` from the cache
+- `manifest_search` — find definitions by name (e.g. search `DestinyInventoryItemDefinition` for a weapon)
+- `manifest_list_tables` — list available definition tables
+- `get_destiny_entity_definition` — fetch one definition directly from the API (no cache)
 
-1. Use `get_activity_history` to get recent activities for a player
-2. Extract the `instanceId` from activity entries
-3. Use `get_post_game_carnage_report` with the `instanceId` to get:
-   - All participants' gamertags/display names
-   - Individual player performance stats
-   - Loadouts and weapon usage
-   - Team assignments and scores
-   - Detailed match statistics
+## Coverage & caveats
 
-**Note:** Player visibility depends on their privacy settings in Destiny 2.
+Covers the gameplay-relevant Bungie API surface: Destiny2 (profiles, items, stats, vendors, all
+inventory/loadout write actions), GroupV2 (clan reads + full management), User, Social/Friends, and
+the legacy Fireteam service.
 
-## Component Types
+- **Private profiles:** `get_destiny_profile` / `get_destiny_character` / `get_destiny_item`
+  automatically attach your OAuth token when authenticated, so private components (full vault, etc.)
+  resolve once you've run `d2-mcp auth`. Without a token they work for public profiles only.
+- **`search_destiny_entities`** targets a Bungie endpoint that Bungie has **disabled server-side**
+  (returns `ErrorCode 21 NotFound`). It's kept for completeness — use **`manifest_search`** instead,
+  which searches the local cache and works.
+- **Modern Fireteam Finder is not implemented.** Those operations are absent from Bungie's published
+  API spec (only entity/definition schemas exist), so they can't be targeted reliably. The documented
+  _legacy_ clan Fireteam endpoints are included.
+- **Intentionally skipped** (low value for a play-assistant): Forum, Content/CMS, Trending,
+  CommunityContent, Tokens/Bungie Rewards, and App-usage endpoints.
 
-Common component types for API calls:
-- `100` - Profiles
-- `200` - Characters
-- `201` - Character Inventories
-- `300` - Item Instances
-- `301` - Item Objectives
-- `302` - Item Perks
+## Reference
 
-## Platform Types
+**Platform types:** `1` Xbox · `2` PSN · `3` Steam · `4` Blizzard · `5` Stadia · `6` Epic · `254` BungieNext · `-1` All
 
-- `1` - Xbox
-- `2` - PlayStation
-- `3` - Steam
-- `4` - Blizzard
-- `5` - Stadia
-- `6` - Epic Games
-- `254` - BungieNext
+**Common components:** `100` Profiles · `200` Characters · `201` Inventories · `205` Equipment ·
+`300` Item Instances · `302` Perks · `304` Stats · `305` Sockets · `400-402` Vendors · `800` Collectibles · `900` Records
 
-## Rate Limits
+**Rate limiting:** 25 requests / 10s (built-in, shared across all tools).
 
-The server implements rate limiting (25 requests per 10 seconds) to comply with Bungie.net API limits.
+## Architecture
 
-## Error Handling
+```
+src/
+  config.ts            env -> BungieConfig
+  auth.ts              OAuth: login flow, disk persistence, auto-refresh
+  destiny-api.ts       Bungie API client (public + Bearer-authed paths)
+  manifest.ts          versioned, on-disk definition cache
+  rate-limiter.ts      sliding-window limiter
+  server.ts            MCP server wiring (stdio + websocket)
+  index.ts             CLI (stdio | websocket | auth | logout)
+  tools/               one module per domain, aggregated via a registry
+    registry.ts        ToolDef type + schema helpers
+    read|stats|user|clan|actions|manifest|auth.ts
+    index.ts           allTools + name->handler map
+```
 
-The server provides detailed error messages for:
-- Authentication failures
-- Rate limit exceeded
-- API server errors
-- Invalid parameters
+Adding a tool = add a `tool(...)` entry in the relevant `tools/*.ts` module; it is auto-registered.
 
 ## License
 

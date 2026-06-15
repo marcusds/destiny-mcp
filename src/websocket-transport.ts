@@ -10,7 +10,7 @@ export class WebSocketServerTransport extends EventEmitter implements Transport 
   constructor(ws: WebSocket) {
     super();
     this.ws = ws;
-    
+
     this.ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString()) as JSONRPCMessage;

@@ -1,39 +1,49 @@
 {
-  "name": "destiny-mcp",
-  "version": "1.0.0",
-  "description": "MCP server for Bungie.net Destiny 2 API integration - provides AI access to comprehensive Destiny 2 game data",
+  "name": "d2-mcp",
+  "version": "2.0.0",
+  "description": "Comprehensive MCP server for the Bungie.net Destiny 2 API — read + authenticated write actions, clan management, and a local manifest cache",
   "main": "dist/index.js",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/DevNvll/destiny-mcp.git"
+  "bin": {
+    "d2-mcp": "dist/index.js"
   },
-  "homepage": "https://github.com/DevNvll/destiny-mcp#readme",
-  "bugs": {
-    "url": "https://github.com/DevNvll/destiny-mcp/issues"
-  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "start:websocket": "node dist/index.js websocket",
     "start:stdio": "node dist/index.js stdio",
+    "auth": "node dist/index.js auth",
     "dev": "tsx src/index.ts",
-    "dev:websocket": "tsx src/index.ts websocket"
+    "dev:auth": "tsx src/index.ts auth",
+    "dev:websocket": "tsx src/index.ts websocket",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"*.md\"",
+    "format:check": "prettier --check \"src/**/*.ts\""
   },
-  "keywords": ["mcp", "bungie", "destiny", "destiny2", "api", "model-context-protocol", "ai", "claude"],
-  "author": "DevNvll",
+  "keywords": ["mcp", "bungie", "destiny", "destiny2", "api", "model-context-protocol", "ai", "claude", "oauth"],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "axios": "^1.6.0",
-    "dotenv": "^16.3.0",
-    "ws": "^8.14.0",
-    "commander": "^11.0.0"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0",
+    "commander": "^12.1.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0",
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.18.0"
   }
 }
