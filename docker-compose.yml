@@ -9,11 +9,12 @@ services:
     environment:
       D2_MCP_DATA_DIR: /data
     ports:
-      # Bound to loopback by default — the WebSocket transport has NO auth, and
-      # stored OAuth tokens allow account writes, so do not expose it to the
-      # network unless you mean to. Override D2_MCP_BIND=0.0.0.0 for LAN access.
+      # Listens on ALL interfaces by default. NOTE: the WebSocket transport has
+      # no auth and stored OAuth tokens allow account writes, so anyone who can
+      # reach this host+port gets full access — keep it on a trusted/firewalled
+      # network or front it with a proxy. Set D2_MCP_BIND=127.0.0.1 for loopback.
       # D2_MCP_PORT changes the host port to avoid collisions.
-      - "${D2_MCP_BIND:-127.0.0.1}:${D2_MCP_PORT:-3000}:3000"
+      - "${D2_MCP_BIND:-0.0.0.0}:${D2_MCP_PORT:-3000}:3000"
     volumes:
       - d2-data:/data # tokens.json + SQLite manifest cache (~350MB)
     command: ["node", "dist/index.js", "websocket", "--port", "3000"]
