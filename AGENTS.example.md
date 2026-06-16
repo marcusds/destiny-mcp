@@ -107,15 +107,65 @@ Hard-won rules (these cause confusing failures otherwise):
 - **Stat name mapping (Armor 3.0, 2025):** the six stats are Weapons / Health / Class / Grenade / Super
   / Melee. "Discipline" → **Grenade** stat; "Class ability / Mobility" → **Class** stat. Armor "tier"
   / "stars" = `gearTier` (1–5); "favor 5-star" = prefer higher `gearTier`.
-- **Loadout slots may be full.** Check `get_character_loadouts` for a `free` slot before snapshotting
-  (snapshotting a locked slot 500s). If all slots are taken, you cannot save a new build without
-  overwriting an existing slot — confirm with the user before doing so.
 - **You cannot author a loadout from a spec.** The only way to create one is `snapshot_loadout`, which
-  captures **currently-equipped** gear into a slot — so saving a build means equipping it first.
+  captures **currently-equipped** gear into a slot — so saving a build means equipping it first. Slots
+  cap at ~12 and may all be full; check `get_character_loadouts` for a `free` slot before snapshotting
+  (snapshotting a locked slot 500s). If all slots are taken, confirm with the user before overwriting
+  an existing one.
 - **Order of operations for a build:** equip exotic + subclass → `insert_plug_by_name` for each
   ability/aspect/fragment → finalize armor (mods are lost if you swap the piece afterward) →
   `insert_plug_by_name` for each mod → (optionally) snapshot to a free slot. Then hand the user the
   artifact-mod list to set manually.
+
+### Plug insertion mechanics — hard-won, READ before applying fragments/mods
+
+Applying a full build the first time hit several non-obvious traps. All confirmed against the live API:
+
+0. **For 2+ plugs on ONE item, USE `set_plugs` (not repeated `insert_plug_by_name`).** `set_plugs`
+   takes `plugNames: [...]`, reads the socket state ONCE, and assigns each plug to a distinct socket
+   while tracking assignments locally — so it is immune to both the parallel race and Bungie's
+   read-after-write lag described below. This is the correct tool for all 5 fragments, or several mods
+   on a piece, in a single call. Reserve single `insert_plug_by_name` for one-off plug changes
+   (a super, a melee, a single mod).
+1. **NEVER fire multiple `insert_plug_by_name` calls at the SAME item in parallel.** If you must use
+   the single tool for several plugs on one item, do them **strictly sequentially**. Concurrent calls
+   race: each reads the same socket state before any write lands, so they pick the same socket and
+   overwrite each other (observed: 3 fragments fired together → two landed on socket 7, one lost).
+   Plugs on **different** items (helmet vs arms vs subclass) are safe in parallel — the race is per-item.
+2. **Even sequential single calls can overwrite, due to Bungie read-after-write lag.** The single tool
+   _does_ try to prefer an empty socket (it ranks empty > occupied), but right after a write the live
+   `[305]` read is often stale, so the next call sees a just-filled socket as empty and overwrites it.
+   If you do use single calls, pass an explicit `socketIndex` for each (raw socket-array index from
+   `get_destiny_item` component **305**) and **verify after**. `set_plugs` sidesteps all of this.
+3. **Always verify with `get_destiny_item { components:[305] }`.** The response's `socketIndex` does
+   equal the raw socket-array index — BUT if the named plug is already equipped _anywhere_ on the item,
+   a forced-`socketIndex` call **no-ops and falsely returns `{applied:true, alreadyEquipped:true,
+socketIndex:<the value you passed>}`** without moving anything. Don't trust the echo; read 305.
+4. **Socket maps:**
+   - **Solar Hunter subclass:** 0 class ability · 1 movement(jump) · 2 super · 3 melee · 4 grenade ·
+     5–6 aspects · 7–11 fragments (5 slots) · 12 = fragment slot locked (`isEnabled:false`) until you
+     have the fragment capacity for it. Empty-fragment plug hash = `424005861`.
+   - **Armor (every slot):** socket **0** = general/stat mod (`enhancements.v2_general`, e.g. a +10
+     stat mod) · sockets **1/2/3** = the three slot-specific mod sockets (`enhancements.v2_head` /
+     `_arms` / `_chest` / `_legs` / `_class`). Empty slot mod is named "Empty Mod Socket".
+5. **Mod family → slot binding** (a wrong slot returns "no insertable plug" or 1676):
+   Siphon (orb gen) → **helmet** · Heavy Handed / Momentum Transfer / Impact Induction / loaders /
+   Fastball → **arms** · resists / Concussive Dampener / Charged Up → **chest** · **Surge mods (e.g.
+   "Solar Weapon Surge")**, Recuperation / Innervation / Absolution / holsters → **legs** · Bomber /
+   Outreach / Distribution / Reaper → **class item**. `Ashes to Assets` = helmet.
+6. **Energy capacity is the real limiter — error `1676 DestinyFailedPlugInsertionRules` usually means
+   "not enough energy," NOT a bad socket/name.** Each piece has an energy cap (gear-tier-5 = 11) and
+   pre-existing mods (incl. the socket-0 stat mod) already spend it. A new mod that would exceed the cap
+   1676s. To add it you must first **free energy by overwriting an existing mod in that piece** (insert
+   the new mod _at the occupied socket index_), not by targeting an empty socket on a full budget.
+   Budget the energy before applying; don't assume empty-looking sockets are usable.
+7. **Super plug name uses a colon:** `Golden Gun: Marksman` (not `Golden Gun - Marksman`).
+8. **Exotic-armor swap that works:** to equip an exotic in a new slot while another exotic armor is on,
+   first equip a Legendary in the _currently-equipped_ exotic's slot, then equip the new exotic.
+9. **Festival Masks sit in the helmet slot and take helmet mods normally** (e.g. energy 11, accepts
+   `enhancements.v2_head` mods).
+10. **Cross-character gear:** `equip_item` requires the item already be on that character. Move it with
+    two `transfer_item` hops (source char → vault → target char) first.
 
 ## Working notes
 
