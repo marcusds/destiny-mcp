@@ -1,4 +1,4 @@
-import { ToolDef, ToolContext, tool, num, str, bool, fields } from './registry.js';
+import { ToolDef, ToolContext, tool, num, str, bool, strArr, fields } from './registry.js';
 
 const LOADOUT_SENTINEL = 2166136261; // FNV offset basis — Bungie's "unset/locked slot" marker
 
@@ -160,6 +160,149 @@ export const loadoutTools: ToolDef[] = [
         }
       }
       throw new Error(`Could not insert "${a.plugName}". Attempts — ${tried.join(' | ')}`);
+    },
+    { write: true }
+  ),
+
+  // -- Composite: place many plugs on one item, distinct sockets -------------
+  tool(
+    'set_plugs',
+    '[auth][write] Insert MULTIPLE plugs (e.g. 5 fragments, or several armor mods) into ONE item in a single pass, assigning each to a DISTINCT socket. Reads socket state once and tracks assignments locally, so it avoids the read-after-write collisions you get from repeated insert_plug_by_name. Must be in orbit/Tower.',
+    {
+      properties: {
+        itemId: str('Item instance ID (subclass or armor piece)'),
+        plugNames: strArr('Plug names to apply, in order (e.g. the 5 Echo fragments)'),
+        characterId: fields.characterId(),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
+      },
+      required: ['itemId', 'plugNames', 'characterId'],
+    },
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const itemId = a.itemId as string;
+      const names = (a.plugNames as string[]).map((n) => n.trim());
+
+      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310]);
+      const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
+      const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
+
+      let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
+      let row = snap.items.find((i) => i.instanceId === itemId);
+      if (!row) {
+        snap = await ctx.inventory.refresh(membershipType, membershipId);
+        row = snap.items.find((i) => i.instanceId === itemId);
+      }
+      const socketEntries: any[] = row
+        ? ((await ctx.manifest.getDefinition('DestinyInventoryItemDefinition', row.hash))?.sockets
+            ?.socketEntries ?? [])
+        : [];
+      const plugSetHashes = new Set<number>();
+      for (const se of socketEntries) {
+        const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
+        if (ps) plugSetHashes.add(ps);
+      }
+      const plugSets = await ctx.manifest.getDefinitions('DestinyPlugSetDefinition', [
+        ...plugSetHashes,
+      ]);
+      const candHashes = (idx: number): number[] => {
+        const out = new Set<number>();
+        for (const p of reusable[String(idx)] ?? [])
+          if (p.canInsert !== false) out.add(p.plugItemHash);
+        const se = socketEntries[idx];
+        if (se) {
+          const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
+          for (const pi of (ps ? plugSets[String(ps)] : undefined)?.reusablePlugItems ?? [])
+            out.add(pi.plugItemHash);
+          if (se.singleInitialItemHash) out.add(se.singleInitialItemHash);
+        }
+        return [...out];
+      };
+
+      const socketCount = Math.max(sockets.length, socketEntries.length);
+      const allHashes = new Set<number>();
+      for (let i = 0; i < socketCount; i++) for (const h of candHashes(i)) allHashes.add(h);
+      for (const s of sockets) if (s?.plugHash) allHashes.add(s.plugHash);
+      const defs = await ctx.manifest.getDefinitions('DestinyInventoryItemDefinition', [
+        ...allHashes,
+      ]);
+      const nameOf = (h: number) => (defs[String(h)]?.displayProperties?.name ?? '').toLowerCase();
+      const isEmpty = (i: number) => {
+        const cur = sockets[i]?.plugHash;
+        return !cur || nameOf(cur).includes('empty');
+      };
+
+      const used = new Set<number>();
+      const results: any[] = [];
+      for (const rawName of names) {
+        const want = rawName.toLowerCase();
+        const cands: Array<{ idx: number; hash: number; already: boolean; empty: boolean }> = [];
+        for (let i = 0; i < socketCount; i++) {
+          if (used.has(i)) continue;
+          for (const h of candHashes(i)) {
+            if (nameOf(h) === want)
+              cands.push({
+                idx: i,
+                hash: h,
+                already: sockets[i]?.plugHash === h,
+                empty: isEmpty(i),
+              });
+          }
+        }
+        if (cands.length === 0) {
+          results.push({
+            plug: rawName,
+            applied: false,
+            reason: 'no free socket offers this plug',
+          });
+          continue;
+        }
+        cands.sort(
+          (x, y) =>
+            (x.already ? 0 : x.empty ? 1 : 2) - (y.already ? 0 : y.empty ? 1 : 2) || x.idx - y.idx
+        );
+        let done = false;
+        const tried: string[] = [];
+        for (const c of cands) {
+          if (c.already) {
+            used.add(c.idx);
+            results.push({
+              plug: rawName,
+              applied: true,
+              alreadyEquipped: true,
+              socketIndex: c.idx,
+            });
+            done = true;
+            break;
+          }
+          try {
+            await ctx.api.insertSocketPlugFree({
+              plug: { socketIndex: c.idx, socketArrayType: 0, plugItemHash: c.hash },
+              itemId,
+              characterId: a.characterId as string,
+              membershipType,
+            });
+            used.add(c.idx);
+            sockets[c.idx] = { plugHash: c.hash }; // local bookkeeping (avoid laggy re-read)
+            results.push({ plug: rawName, applied: true, socketIndex: c.idx });
+            done = true;
+            break;
+          } catch (e) {
+            tried.push(`s${c.idx}: ${e instanceof Error ? e.message.slice(0, 50) : ''}`);
+          }
+        }
+        if (!done) results.push({ plug: rawName, applied: false, reason: tried.join(' | ') });
+      }
+      return {
+        itemId,
+        applied: results.filter((r) => r.applied).length,
+        total: names.length,
+        results,
+      };
     },
     { write: true }
   ),
