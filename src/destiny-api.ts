@@ -80,7 +80,15 @@ export class DestinyAPI {
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
-        const apiMsg = (error.response?.data as any)?.Message;
+        const data = error.response?.data as any;
+        const apiMsg: string | undefined = data?.Message;
+        const apiCode: number | undefined = data?.ErrorCode;
+        // Bungie returns HTTP 500 for many *gameplay* errors (e.g. equipping
+        // while in an activity) with a meaningful ErrorCode/Message in the body.
+        // Surface that first rather than masking it as a generic server error.
+        if (apiMsg && apiCode !== undefined && apiCode !== 1) {
+          throw new Error(`Bungie API Error ${apiCode} (${data?.ErrorStatus}): ${apiMsg}`);
+        }
         if (status === 401) {
           throw new Error('Unauthorized — token invalid/expired. Re-run `d2-mcp auth`.');
         }
