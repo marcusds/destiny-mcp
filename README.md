@@ -5,8 +5,9 @@ A comprehensive [Model Context Protocol](https://modelcontextprotocol.io) server
 spanning public reads, authenticated write actions, clan management, friends, a server-side inventory
 cache, and a local manifest database.
 
-> Forked from [`DevNvll/destiny-mcp`](https://github.com/DevNvll/destiny-mcp) (MIT) and extended with
-> a hardened OAuth flow, write actions, clan management, user lookups, and an on-disk manifest cache.
+> Forked from [`DevNvll/destiny-mcp`](https://github.com/DevNvll/destiny-mcp) (MIT) — fork maintained
+> at [`marcusds/destiny-mcp`](https://github.com/marcusds/destiny-mcp) — extended with a hardened
+> OAuth flow, write actions, clan management, user lookups, and an on-disk manifest cache.
 
 ## What's included
 
