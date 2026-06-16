@@ -26,6 +26,28 @@ export interface InventorySnapshot {
   items: InventoryRow[];
 }
 
+export interface ArmorRow {
+  name: string;
+  slot: string;
+  /** Armor 3.0 tier (1-5), or null if unknown. */
+  tier: number | null;
+  energy: number | null;
+  character?: string;
+  location: string;
+  equipped: boolean;
+  /** Resolved Armor 3.0 stats: Weapons/Health/Class/Grenade/Super/Melee. */
+  stats: Record<string, number>;
+  instanceId: string;
+  hash: number;
+}
+
+export interface ArmorSnapshot {
+  membershipType: number;
+  membershipId: string;
+  fetchedAt: number;
+  armor: ArmorRow[];
+}
+
 const LOCATIONS: Record<number, string> = {
   0: 'unknown',
   1: 'inventory',
@@ -34,6 +56,13 @@ const LOCATIONS: Record<number, string> = {
   4: 'postmaster',
 };
 const CLASSES: Record<number, string> = { 0: 'Titan', 1: 'Hunter', 2: 'Warlock', 3: 'Unknown' };
+const ARMOR_BUCKETS: Record<number, string> = {
+  3448274439: 'helmet',
+  3551918588: 'gauntlets',
+  14239492: 'chest',
+  20886954: 'legs',
+  1585787867: 'class',
+};
 
 /**
  * Server-side inventory snapshots: flattened, name-resolved item lists cached
@@ -43,6 +72,7 @@ const CLASSES: Record<number, string> = { 0: 'Titan', 1: 'Hunter', 2: 'Warlock',
  */
 export class InventoryCache {
   private snapshots = new Map<string, InventorySnapshot>();
+  private armorSnapshots = new Map<string, ArmorSnapshot>();
   private dir: string;
   private intervalMs: number;
   private timer?: NodeJS.Timeout;
@@ -75,10 +105,10 @@ export class InventoryCache {
       if (!fs.existsSync(this.dir)) return;
       for (const file of fs.readdirSync(this.dir)) {
         if (!file.endsWith('.json')) continue;
-        const snap: InventorySnapshot = JSON.parse(
-          fs.readFileSync(path.join(this.dir, file), 'utf-8')
-        );
-        this.snapshots.set(this.key(snap.membershipType, snap.membershipId), snap);
+        const parsed = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8'));
+        const k = this.key(parsed.membershipType, parsed.membershipId);
+        if (file.startsWith('armor-')) this.armorSnapshots.set(k, parsed as ArmorSnapshot);
+        else this.snapshots.set(k, parsed as InventorySnapshot);
       }
     } catch {
       /* ignore corrupt cache */
@@ -86,12 +116,17 @@ export class InventoryCache {
   }
 
   private saveToDisk(snap: InventorySnapshot): void {
+    this.write(`${snap.membershipType}-${snap.membershipId}.json`, snap);
+  }
+
+  private saveArmorToDisk(snap: ArmorSnapshot): void {
+    this.write(`armor-${snap.membershipType}-${snap.membershipId}.json`, snap);
+  }
+
+  private write(file: string, data: unknown): void {
     try {
       fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(
-        path.join(this.dir, `${snap.membershipType}-${snap.membershipId}.json`),
-        JSON.stringify(snap)
-      );
+      fs.writeFileSync(path.join(this.dir, file), JSON.stringify(data));
     } catch {
       /* best-effort */
     }
@@ -160,6 +195,105 @@ export class InventoryCache {
     return snap;
   }
 
+  // -- Armor snapshot (stats + tier + energy) -----------------------------
+
+  getArmorSnapshot(membershipType: number, membershipId: string): ArmorSnapshot | undefined {
+    return this.armorSnapshots.get(this.key(membershipType, membershipId));
+  }
+
+  async getOrBuildArmor(
+    membershipType: number,
+    membershipId: string,
+    force = false
+  ): Promise<ArmorSnapshot> {
+    const cached = this.getArmorSnapshot(membershipType, membershipId);
+    if (cached && !force) return cached;
+    return this.refreshArmor(membershipType, membershipId);
+  }
+
+  /** Fetch armor with per-instance stats/tier/energy and name-resolve it; cache it. */
+  async refreshArmor(membershipType: number, membershipId: string): Promise<ArmorSnapshot> {
+    const profile = await this.api.getArmorProfile(membershipType, membershipId);
+    const R = profile.Response ?? {};
+    const instances: Record<string, any> = R.itemComponents?.instances?.data ?? {};
+    const statsData: Record<string, any> = R.itemComponents?.stats?.data ?? {};
+    const characters: Record<string, any> = R.characters?.data ?? {};
+
+    type Raw = {
+      hash: number;
+      instanceId: string;
+      character?: string;
+      location: string;
+      equipped: boolean;
+    };
+    const raw: Raw[] = [];
+    const collect = (
+      items: any[],
+      character: string | undefined,
+      location: string,
+      equipped: boolean
+    ) => {
+      for (const it of items ?? []) {
+        if (it.itemInstanceId)
+          raw.push({
+            hash: it.itemHash,
+            instanceId: it.itemInstanceId,
+            character,
+            location,
+            equipped,
+          });
+      }
+    };
+    collect(R.profileInventory?.data?.items, undefined, 'vault', false);
+    for (const [cid, inv] of Object.entries<any>(R.characterInventories?.data ?? {})) {
+      collect(inv.items, CLASSES[characters[cid]?.classType] ?? cid, 'inventory', false);
+    }
+    for (const [cid, eq] of Object.entries<any>(R.characterEquipment?.data ?? {})) {
+      collect(eq.items, CLASSES[characters[cid]?.classType] ?? cid, 'equipped', true);
+    }
+
+    const itemDefs = await this.manifest.getDefinitions(
+      'DestinyInventoryItemDefinition',
+      raw.map((r) => r.hash)
+    );
+    const statHashes = new Set<number>();
+    for (const s of Object.values(statsData))
+      for (const h of Object.keys(s.stats ?? {})) statHashes.add(Number(h));
+    const statDefs = await this.manifest.getDefinitions('DestinyStatDefinition', [...statHashes]);
+    const statName = (h: string) => statDefs[h]?.displayProperties?.name ?? h;
+
+    const armor: ArmorRow[] = raw
+      .map((r): ArmorRow | null => {
+        const def = itemDefs[String(r.hash)];
+        const slot = ARMOR_BUCKETS[def?.inventory?.bucketTypeHash];
+        if (!slot) return null;
+        const inst = instances[r.instanceId] ?? {};
+        const stats: Record<string, number> = {};
+        for (const [h, v] of Object.entries<any>(statsData[r.instanceId]?.stats ?? {})) {
+          stats[statName(h)] = v.value;
+        }
+        return {
+          name: def?.displayProperties?.name ?? '',
+          slot,
+          tier: inst.gearTier ?? null,
+          energy: inst.energy?.energyCapacity ?? null,
+          character: r.character,
+          location: r.location,
+          equipped: r.equipped,
+          stats,
+          instanceId: r.instanceId,
+          hash: r.hash,
+        };
+      })
+      .filter((r): r is ArmorRow => r !== null);
+    armor.sort((a, b) => (b.tier ?? 0) - (a.tier ?? 0) || a.name.localeCompare(b.name));
+
+    const snap: ArmorSnapshot = { membershipType, membershipId, fetchedAt: Date.now(), armor };
+    this.armorSnapshots.set(this.key(membershipType, membershipId), snap);
+    this.saveArmorToDisk(snap);
+    return snap;
+  }
+
   /** Resolve (and cache) the authenticated account's primary Destiny membership. */
   async resolvePrimary(): Promise<{ membershipType: number; membershipId: string } | undefined> {
     if (this.primary) return this.primary;
@@ -192,8 +326,13 @@ export class InventoryCache {
   private async tick(): Promise<void> {
     if (!this.auth.isAuthenticated()) return; // quietly wait for `d2-mcp auth`
     try {
-      const snap = await this.refreshPrimary();
-      if (snap) console.error(`[inventory] refreshed ${snap.items.length} items.`);
+      const p = await this.resolvePrimary();
+      if (!p) return;
+      const snap = await this.refresh(p.membershipType, p.membershipId);
+      const armor = await this.refreshArmor(p.membershipType, p.membershipId);
+      console.error(
+        `[inventory] refreshed ${snap.items.length} items, ${armor.armor.length} armor.`
+      );
     } catch (error) {
       console.error(
         '[inventory] refresh failed:',

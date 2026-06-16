@@ -1,13 +1,5 @@
-import { ToolDef, ToolContext, tool, num, str, fields } from './registry.js';
+import { ToolDef, ToolContext, tool, num, str, bool, fields } from './registry.js';
 
-const ARMOR_BUCKETS: Record<number, string> = {
-  3448274439: 'helmet',
-  3551918588: 'gauntlets',
-  14239492: 'chest',
-  20886954: 'legs',
-  1585787867: 'class',
-};
-const CLASSES: Record<number, string> = { 0: 'Titan', 1: 'Hunter', 2: 'Warlock', 3: 'Unknown' };
 const LOADOUT_SENTINEL = 2166136261; // FNV offset basis — Bungie's "unset/locked slot" marker
 
 async function resolveMembership(
@@ -158,7 +150,7 @@ export const loadoutTools: ToolDef[] = [
   // -- Armor with stats + tier + energy in one call --------------------------
   tool(
     'get_armor',
-    'List owned armor with resolved Armor 3.0 stats (Weapons/Health/Class/Grenade/Super/Melee), gearTier (1-5), and energy — in one call, including vault. Omit membership to use your authenticated account.',
+    'List owned armor with resolved Armor 3.0 stats (Weapons/Health/Class/Grenade/Super/Melee), gearTier (1-5), and energy. Reads a cached snapshot (refreshed hourly) unless refresh=true. Includes vault. Omit membership to use your authenticated account.',
     {
       properties: {
         membershipType: fields.membershipType(),
@@ -166,6 +158,7 @@ export const loadoutTools: ToolDef[] = [
         slot: str('Filter by slot: helmet | gauntlets | chest | legs | class'),
         nameContains: str('Filter by item name substring (e.g. a set name)'),
         minTier: num('Only return armor at or above this gearTier (1-5)'),
+        refresh: bool('Force a live pull instead of using the cached snapshot'),
       },
     },
     async (ctx, a) => {
@@ -174,90 +167,28 @@ export const loadoutTools: ToolDef[] = [
         a.membershipType as number | undefined,
         a.membershipId as string | undefined
       );
-      const prof = await ctx.api.getArmorProfile(membershipType, membershipId);
-      const R = prof.Response ?? {};
-      const instances: Record<string, any> = R.itemComponents?.instances?.data ?? {};
-      const statsData: Record<string, any> = R.itemComponents?.stats?.data ?? {};
-      const characters: Record<string, any> = R.characters?.data ?? {};
-
-      type Raw = {
-        hash: number;
-        instanceId: string;
-        character?: string;
-        location: string;
-        equipped: boolean;
-      };
-      const raw: Raw[] = [];
-      const collect = (
-        items: any[],
-        character: string | undefined,
-        location: string,
-        equipped: boolean
-      ) => {
-        for (const it of items ?? []) {
-          if (it.itemInstanceId)
-            raw.push({
-              hash: it.itemHash,
-              instanceId: it.itemInstanceId,
-              character,
-              location,
-              equipped,
-            });
-        }
-      };
-      collect(R.profileInventory?.data?.items, undefined, 'vault', false);
-      for (const [cid, inv] of Object.entries<any>(R.characterInventories?.data ?? {})) {
-        collect(inv.items, CLASSES[characters[cid]?.classType] ?? cid, 'inventory', false);
-      }
-      for (const [cid, eq] of Object.entries<any>(R.characterEquipment?.data ?? {})) {
-        collect(eq.items, CLASSES[characters[cid]?.classType] ?? cid, 'equipped', true);
-      }
-
-      // Classify by the item DEFINITION's home bucket (vault items report the vault bucket).
-      const itemDefs = await ctx.manifest.getDefinitions(
-        'DestinyInventoryItemDefinition',
-        raw.map((r) => r.hash)
+      const snap = await ctx.inventory.getOrBuildArmor(
+        membershipType,
+        membershipId,
+        a.refresh === true
       );
-      const statHashes = new Set<number>();
-      for (const s of Object.values(statsData))
-        for (const h of Object.keys(s.stats ?? {})) statHashes.add(Number(h));
-      const statDefs = await ctx.manifest.getDefinitions('DestinyStatDefinition', [...statHashes]);
-      const statName = (h: string) => statDefs[h]?.displayProperties?.name ?? h;
 
-      let rows = raw
-        .map((r) => {
-          const def = itemDefs[String(r.hash)];
-          const slot = ARMOR_BUCKETS[def?.inventory?.bucketTypeHash];
-          if (!slot) return null;
-          const inst = instances[r.instanceId] ?? {};
-          const stats: Record<string, number> = {};
-          for (const [h, v] of Object.entries<any>(statsData[r.instanceId]?.stats ?? {})) {
-            stats[statName(h)] = v.value;
-          }
-          return {
-            name: def?.displayProperties?.name ?? '',
-            slot,
-            tier: inst.gearTier ?? null,
-            energy: inst.energy?.energyCapacity ?? null,
-            character: r.character,
-            location: r.location,
-            equipped: r.equipped,
-            stats,
-            instanceId: r.instanceId,
-            hash: r.hash,
-          };
-        })
-        .filter((r): r is NonNullable<typeof r> => r !== null);
-
+      let rows = snap.armor;
       const slot = (a.slot as string | undefined)?.toLowerCase();
       const nameSub = (a.nameContains as string | undefined)?.toLowerCase();
       const minTier = a.minTier as number | undefined;
       if (slot) rows = rows.filter((r) => r.slot === slot);
       if (nameSub) rows = rows.filter((r) => r.name.toLowerCase().includes(nameSub));
       if (minTier !== undefined) rows = rows.filter((r) => (r.tier ?? 0) >= minTier);
-      rows.sort((x, y) => (y.tier ?? 0) - (x.tier ?? 0) || x.name.localeCompare(y.name));
 
-      return { membershipType, membershipId, count: rows.length, armor: rows };
+      return {
+        membershipType,
+        membershipId,
+        fetchedAt: new Date(snap.fetchedAt).toISOString(),
+        ageSeconds: Math.round((Date.now() - snap.fetchedAt) / 1000),
+        count: rows.length,
+        armor: rows,
+      };
     }
   ),
 
