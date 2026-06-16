@@ -79,9 +79,11 @@ export const loadoutTools: ToolDef[] = [
         if (se) {
           const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
           const def = ps ? plugSets[String(ps)] : undefined;
-          for (const pi of def?.reusablePlugItems ?? []) {
-            if (pi.currentlyCanRoll !== false) out.add(pi.plugItemHash);
-          }
+          // Include all plugSet items — subclass aspects/fragments are unlocks
+          // (currentlyCanRoll=false) so we must not filter on it. Sunset
+          // duplicates that can't actually be inserted are weeded out by the
+          // per-candidate insert retry below.
+          for (const pi of def?.reusablePlugItems ?? []) out.add(pi.plugItemHash);
           if (se.singleInitialItemHash) out.add(se.singleInitialItemHash);
         }
         return [...out];
@@ -93,17 +95,28 @@ export const loadoutTools: ToolDef[] = [
         if (forceIdx !== undefined && i !== forceIdx) continue;
         for (const h of candidateHashesForSocket(i)) allHashes.add(h);
       }
+      // Also resolve each socket's CURRENT plug so we can tell empty sockets apart.
+      for (const s of sockets) if (s?.plugHash) allHashes.add(s.plugHash);
       const defs = await ctx.manifest.getDefinitions('DestinyInventoryItemDefinition', [
         ...allHashes,
       ]);
       const nameOf = (h: number) => (defs[String(h)]?.displayProperties?.name ?? '').toLowerCase();
+      const isEmptySocket = (i: number) => {
+        const cur = sockets[i]?.plugHash;
+        return !cur || nameOf(cur).includes('empty');
+      };
 
-      const candidates: Array<{ idx: number; hash: number; already: boolean }> = [];
+      const candidates: Array<{ idx: number; hash: number; already: boolean; empty: boolean }> = [];
       for (let i = 0; i < socketCount; i++) {
         if (forceIdx !== undefined && i !== forceIdx) continue;
         for (const h of candidateHashesForSocket(i)) {
           if (nameOf(h) === want) {
-            candidates.push({ idx: i, hash: h, already: sockets[i]?.plugHash === h });
+            candidates.push({
+              idx: i,
+              hash: h,
+              already: sockets[i]?.plugHash === h,
+              empty: isEmptySocket(i),
+            });
           }
         }
       }
@@ -112,7 +125,11 @@ export const loadoutTools: ToolDef[] = [
           `No currently-insertable plug named "${a.plugName}" found on this item (check spelling, or it may not be unlocked).`
         );
       }
-      candidates.sort((x, y) => Number(x.already) - Number(y.already));
+      // Prefer an empty socket (so repeated plugs fill new slots instead of
+      // overwriting), then any non-target socket; never disturb a socket that
+      // already holds the target.
+      const rank = (c: { already: boolean; empty: boolean }) => (c.already ? 2 : c.empty ? 0 : 1);
+      candidates.sort((x, y) => rank(x) - rank(y) || x.idx - y.idx);
       if (candidates[0].already) {
         return {
           applied: true,
