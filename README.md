@@ -207,6 +207,14 @@ src/
 
 Adding a tool = add a `tool(...)` entry in the relevant `tools/*.ts` module; it is auto-registered.
 
+## AGENTS.md
+
+[`AGENTS.example.md`](./AGENTS.example.md) is a ready-to-use template for AI agent sessions (Claude
+Code, Cursor, etc.). Copy it to your working directory as `AGENTS.md`, fill in the placeholders under
+**Account** with your Bungie membership IDs and character IDs, and agents will have the context they
+need to drive the MCP server without re-fetching identity data on every turn. It also encodes
+hard-won rules about API constraints, build order-of-operations, and Armor 3.0 stat naming.
+
 ## License
 
 MIT
