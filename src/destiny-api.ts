@@ -129,6 +129,20 @@ export class DestinyAPI {
     });
   }
 
+  /** Profile with armor item lists + per-instance stats/tier/energy for stat optimization. */
+  getArmorProfile(membershipType: number, membershipId: string) {
+    return this.makeReadRequest(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
+      components: '200,102,201,205,300,304',
+    });
+  }
+
+  /** Character loadout slots (component 206). */
+  getCharacterLoadouts(membershipType: number, membershipId: string) {
+    return this.makeReadRequest(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
+      components: '206',
+    });
+  }
+
   getCharacter(
     membershipType: number,
     membershipId: string,

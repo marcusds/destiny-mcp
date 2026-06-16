@@ -8,11 +8,13 @@ import { manifestTools } from './manifest.js';
 import { authTools } from './auth.js';
 import { socialTools } from './social.js';
 import { inventoryTools } from './inventory.js';
+import { loadoutTools } from './loadout.js';
 
 /** The full set of tools exposed by the server. */
 export const allTools: ToolDef[] = [
   ...readTools,
   ...inventoryTools,
+  ...loadoutTools,
   ...statsTools,
   ...userTools,
   ...clanTools,
