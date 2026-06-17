@@ -448,15 +448,35 @@ export class DestinyAPI {
     });
   }
 
+  /** Per-item promise chain so concurrent plug writes to ONE item can't race
+   * (Bungie applies them serially anyway; parallel client calls otherwise read
+   * the same pre-write socket state and collide on the same socket). */
+  #plugWriteChain = new Map<string, Promise<unknown>>();
+
   insertSocketPlugFree(args: {
     plug: { socketIndex: number; socketArrayType: number; plugItemHash: number };
     itemId: string;
     characterId: string;
     membershipType: number;
   }) {
-    return this.makeAuthRequest('post', '/Destiny2/Actions/Items/InsertSocketPlugFree/', {
-      data: args,
+    const key = args.itemId;
+    const prev = this.#plugWriteChain.get(key) ?? Promise.resolve();
+    // Run after any in-flight write to the same item; a prior failure must not
+    // break the chain for subsequent writes.
+    const run = prev
+      .catch(() => undefined)
+      .then(() =>
+        this.makeAuthRequest('post', '/Destiny2/Actions/Items/InsertSocketPlugFree/', {
+          data: args,
+        })
+      );
+    const settled = run.catch(() => undefined);
+    this.#plugWriteChain.set(key, settled);
+    // Drop the entry once it's the tail and has settled, to bound the map size.
+    void settled.then(() => {
+      if (this.#plugWriteChain.get(key) === settled) this.#plugWriteChain.delete(key);
     });
+    return run;
   }
 
   equipLoadout(args: { loadoutIndex: number; characterId: string; membershipType: number }) {

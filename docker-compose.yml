@@ -13,8 +13,7 @@ services:
       # no auth and stored OAuth tokens allow account writes, so anyone who can
       # reach this host+port gets full access — keep it on a trusted/firewalled
       # network or front it with a proxy. Set D2_MCP_BIND=127.0.0.1 for loopback.
-      # D2_MCP_PORT changes the host port to avoid collisions.
-      - "${D2_MCP_BIND:-0.0.0.0}:${D2_MCP_PORT:-3000}:3000"
+      - "${D2_MCP_BIND:-0.0.0.0}:3737:3000"
     volumes:
       - d2-data:/data # tokens.json + SQLite manifest cache (~350MB)
     command: ["node", "dist/index.js", "http", "--port", "3000"]

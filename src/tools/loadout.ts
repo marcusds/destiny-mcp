@@ -16,6 +16,39 @@ async function resolveMembership(
   return p;
 }
 
+/** Energy cost of a plug per its definition (0 if none — e.g. subclass plugs / empty sockets). */
+function plugEnergyCost(defs: Record<string, any>, hash?: number): number {
+  return defs[String(hash)]?.plug?.energyCost?.energyCost ?? 0;
+}
+
+/**
+ * Throw a clear error if inserting `newHash` into socket `targetIdx` would exceed the
+ * armor piece's energy capacity. No-op for items with no energy meter (subclasses), so
+ * fragments/aspects are unaffected. Surfaces the real cause instead of a raw
+ * `1676 DestinyFailedPlugInsertionRules`. Pass the item's instance `energy` component (300).
+ */
+function assertEnergyFits(opts: {
+  energy: { energyCapacity?: number; energyUsed?: number } | undefined | null;
+  curSocketHash?: number;
+  newHash: number;
+  defs: Record<string, any>;
+}): void {
+  const cap = opts.energy?.energyCapacity;
+  if (cap === undefined || cap === null) return; // not an energy item (subclass, etc.)
+  const used = opts.energy?.energyUsed ?? 0;
+  const oldCost = plugEnergyCost(opts.defs, opts.curSocketHash); // freed by overwriting this socket
+  const newCost = plugEnergyCost(opts.defs, opts.newHash);
+  const free = cap - used + oldCost;
+  if (newCost > free) {
+    const name = opts.defs[String(opts.newHash)]?.displayProperties?.name ?? opts.newHash;
+    throw new Error(
+      `Insufficient armor energy for "${name}": needs ${newCost}, only ${free} free ` +
+        `(capacity ${cap}, used ${used}). Free ~${newCost - free} energy by removing or ` +
+        `downgrading another mod on this piece first.`
+    );
+  }
+}
+
 export const loadoutTools: ToolDef[] = [
   // -- Name-based, socket-aware, current-version plug insert -----------------
   tool(
@@ -42,10 +75,13 @@ export const loadoutTools: ToolDef[] = [
       const want = (a.plugName as string).trim().toLowerCase();
       const forceIdx = a.socketIndex as number | undefined;
 
-      // Live sockets (current plug) + live reusable plugs (armor mods).
-      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310]);
+      // Live sockets (current plug) + live reusable plugs (armor mods) + instance energy (300).
+      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310, 300]);
       const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
       const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
+      const energy = item.Response?.instance?.data?.energy as
+        | { energyCapacity?: number; energyUsed?: number }
+        | undefined;
 
       // Resolve the item's definition hash (for subclass plugSet options) via the snapshot.
       let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
@@ -143,6 +179,12 @@ export const loadoutTools: ToolDef[] = [
       for (const c of candidates) {
         if (c.already) continue;
         try {
+          assertEnergyFits({
+            energy,
+            curSocketHash: sockets[c.idx]?.plugHash,
+            newHash: c.hash,
+            defs,
+          });
           await ctx.api.insertSocketPlugFree({
             plug: { socketIndex: c.idx, socketArrayType: 0, plugItemHash: c.hash },
             itemId,
@@ -187,9 +229,14 @@ export const loadoutTools: ToolDef[] = [
       const itemId = a.itemId as string;
       const names = (a.plugNames as string[]).map((n) => n.trim());
 
-      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310]);
+      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310, 300]);
       const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
       const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
+      const energy = item.Response?.instance?.data?.energy as
+        | { energyCapacity?: number; energyUsed?: number }
+        | undefined;
+      // Running energy tally — each placed mod changes how much is free for the next.
+      let energyUsed = energy?.energyUsed ?? 0;
 
       let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
       let row = snap.items.find((i) => i.instanceId === itemId);
@@ -280,6 +327,13 @@ export const loadoutTools: ToolDef[] = [
             break;
           }
           try {
+            const oldCost = plugEnergyCost(defs, sockets[c.idx]?.plugHash);
+            assertEnergyFits({
+              energy: { energyCapacity: energy?.energyCapacity, energyUsed },
+              curSocketHash: sockets[c.idx]?.plugHash,
+              newHash: c.hash,
+              defs,
+            });
             await ctx.api.insertSocketPlugFree({
               plug: { socketIndex: c.idx, socketArrayType: 0, plugItemHash: c.hash },
               itemId,
@@ -288,6 +342,7 @@ export const loadoutTools: ToolDef[] = [
             });
             used.add(c.idx);
             sockets[c.idx] = { plugHash: c.hash }; // local bookkeeping (avoid laggy re-read)
+            energyUsed += plugEnergyCost(defs, c.hash) - oldCost; // keep running tally accurate
             results.push({ plug: rawName, applied: true, socketIndex: c.idx });
             done = true;
             break;
