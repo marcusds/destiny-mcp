@@ -138,3 +138,42 @@ test('any checklist records the activity a find happened in', async () => {
     }
   );
 });
+
+test('character-scoped checklists are tracked across characters', async () => {
+  const dataDir = tempDir();
+  const sectors = {
+    hash: 61,
+    displayProperties: { name: 'Lost Sectors' },
+    entries: [{ hash: 5, displayProperties: { name: '1. European Dead Zone' } }],
+  };
+  let found = false;
+  const api: any = {
+    getProfile: async () => ({
+      Response: {
+        profileProgression: { data: { checklists: {} } },
+        // Only the Warlock has it; the Hunter's copy is still unfound.
+        characterProgressions: {
+          data: {
+            h: { checklists: { 61: { 5: false } } },
+            w: { checklists: { 61: { 5: found } } },
+          },
+        },
+        profileRecords: { data: { records: {} } },
+      },
+    }),
+  };
+  const manifest: any = {
+    getAll: async (t: string) => (t === 'DestinyChecklistDefinition' ? [sectors] : []),
+    getDefinitions: async () => ({}),
+  };
+  const inventory: any = { resolvePrimary: async () => ({ membershipType: 3, membershipId: 'm' }) };
+  const tracker = new ChecklistTracker(api, manifest, {} as any, inventory, {
+    apiKey: '',
+    baseUrl: '',
+    dataDir,
+  });
+  await tracker.observe();
+  found = true;
+  await tracker.observe();
+  assert.equal(tracker.locationOf(5)?.checklist, 'Lost Sectors');
+});

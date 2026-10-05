@@ -126,13 +126,18 @@ export class ChecklistTracker {
     const p = await this.inventory.resolvePrimary();
     if (!p) return undefined;
     const [profile, checklists, records] = await Promise.all([
-      this.api.getProfile(p.membershipType, p.membershipId, [104, 204, 900]),
+      this.api.getProfile(p.membershipType, p.membershipId, [104, 202, 204, 900]),
       this.manifest.getAll('DestinyChecklistDefinition'),
       this.manifest.getAll('DestinyRecordDefinition'),
     ]);
     const R = profile.Response ?? {};
     const checklistState: Record<string, Record<string, boolean>> = R.profileProgression?.data
       ?.checklists ?? {};
+    // Character-scoped checklists (Lost Sectors, Jade Rabbits...): an entry counts
+    // as found once any character has it, matching how get_checklist reports them.
+    const charChecklists: Array<Record<string, Record<string, boolean>>> = Object.values<any>(
+      R.characterProgressions?.data ?? {}
+    ).map((c) => c.checklists ?? {});
     const recordState: Record<string, any> = R.profileRecords?.data?.records ?? {};
     await this.noteActivity(R);
     const activity =
@@ -143,8 +148,10 @@ export class ChecklistTracker {
 
     for (const def of checklists) {
       const key = String(def.hash);
-      const states = checklistState[key];
-      if (!states) continue; // character-scoped or not on this profile
+      const sources = [checklistState[key], ...charChecklists.map((c) => c[key])].filter(Boolean);
+      if (!sources.length) continue; // not on this profile
+      const states: Record<string, boolean> = {};
+      for (const src of sources) for (const [h, v] of Object.entries(src)) if (v) states[h] = true;
       const found = (def.entries ?? [])
         .filter((e: any) => states[String(e.hash)])
         .map((e: any) => String(e.hash));
