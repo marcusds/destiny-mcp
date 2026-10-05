@@ -129,6 +129,7 @@ export const accountTools: ToolDef[] = [
       };
       await walk(node);
 
+      const sealHash = String(node.completionRecordHash);
       const [profile, recordDefs] = await Promise.all([
         ctx.api.getProfile(membershipType, membershipId, [900]),
         ctx.manifest.getDefinitions('DestinyRecordDefinition', recordHashes),
@@ -161,7 +162,11 @@ export const accountTools: ToolDef[] = [
 
       const triumphs = entries.map(({ h, def, comp, objectives }) => {
         const state: number = comp?.state ?? OBJECTIVE_NOT_COMPLETED;
-        const complete = (state & OBJECTIVE_NOT_COMPLETED) === 0;
+        // Interval (multi-step) records keep the not-completed flag even after
+        // every interval is done; judge those by their interval objectives.
+        const complete = comp?.intervalObjectives?.length
+          ? comp.intervalObjectives.every((o: any) => o.complete)
+          : (state & OBJECTIVE_NOT_COMPLETED) === 0;
         const secret = (state & OBSCURED) !== 0;
         return {
           hash: h,
@@ -179,11 +184,22 @@ export const accountTools: ToolDef[] = [
         };
       });
       const incomplete = triumphs.filter((t) => !t.complete).sort((x, y) => y.percent - x.percent);
+      // The seal's own counter is authoritative: it can require fewer triumphs
+      // than the seal lists (e.g. 24 of 29), and the API doesn't say which count.
+      const sealObjective = (
+        profileRecords[sealHash] ?? charRecords.map((c) => c[sealHash]).find(Boolean)
+      )?.objectives?.[0];
       return {
         seal: node.displayProperties?.name,
         title,
         completed: triumphs.length - incomplete.length,
         total: triumphs.length,
+        ...(sealObjective && {
+          sealProgress: `${sealObjective.progress}/${sealObjective.completionValue}`,
+          ...(sealObjective.completionValue < triumphs.length && {
+            note: `The title needs ${sealObjective.completionValue} of these ${triumphs.length} triumphs.`,
+          }),
+        }),
         incomplete,
         ...(a.includeComplete === true && {
           complete: triumphs.filter((t) => t.complete).map((t) => t.name),

@@ -130,3 +130,69 @@ test('get_character_loadouts names loadouts and their items', async () => {
   ]);
   assert.deepEqual([out.used, out.free, out.locked], [1, [1], 1]);
 });
+
+test('get_title_progress treats finished interval triumphs as complete and reports the seal counter', async () => {
+  const seal = {
+    hash: 1,
+    completionRecordHash: 900,
+    displayProperties: { name: 'The Edge of Fate' },
+    children: { records: [{ recordHash: 10 }, { recordHash: 11 }, { recordHash: 12 }] },
+  };
+  const recordDefs: Record<number, any> = {
+    900: { titleInfo: { hasTitle: true, titlesByGender: { Male: 'Fated Weapon' } } },
+    10: { displayProperties: { name: 'Matterspark' } },
+    11: { displayProperties: { name: 'Stitchripper' } },
+    12: { displayProperties: { name: 'Done Thing' } },
+  };
+  const ctx: any = {
+    inventory: { resolvePrimary: async () => primary },
+    manifest: {
+      getAll: async () => [seal, { hash: 2, displayProperties: { name: 'Other' } }],
+      getDefinitions: async (table: string, hashes: number[]) =>
+        Object.fromEntries(
+          hashes.map((h) => [
+            String(h),
+            table === 'DestinyRecordDefinition' ? recordDefs[h] : { progressDescription: 'Bosses' },
+          ])
+        ),
+    },
+    api: {
+      getProfile: async () => ({
+        Response: {
+          profileRecords: {
+            data: {
+              records: {
+                900: {
+                  state: 4,
+                  objectives: [{ objectiveHash: 5, progress: 2, completionValue: 2 }],
+                },
+                // state 7 still has ObjectiveNotCompleted set, but all intervals are done.
+                10: {
+                  state: 7,
+                  intervalObjectives: [
+                    { objectiveHash: 1, progress: 1, completionValue: 1, complete: true },
+                  ],
+                },
+                11: {
+                  state: 4,
+                  objectives: [
+                    { objectiveHash: 2, progress: 1, completionValue: 3, complete: false },
+                  ],
+                },
+                12: { state: 67, objectives: [] },
+              },
+            },
+          },
+        },
+      }),
+    },
+  };
+  const out = await run('get_title_progress', ctx, { title: 'fated weapon' });
+  assert.equal(out.title, 'Fated Weapon');
+  assert.equal(out.completed, 2);
+  assert.equal(out.sealProgress, '2/2');
+  assert.deepEqual(
+    out.incomplete.map((t: any) => [t.name, t.percent, t.objectives[0].progress]),
+    [['Stitchripper', 33, '1/3']]
+  );
+});
