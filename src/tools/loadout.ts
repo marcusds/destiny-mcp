@@ -1,20 +1,7 @@
 import { ToolDef, ToolContext, tool, num, str, bool, strArr, fields } from './registry.js';
+import { resolveMembership } from './membership.js';
 
 const LOADOUT_SENTINEL = 2166136261; // FNV offset basis — Bungie's "unset/locked slot" marker
-
-async function resolveMembership(
-  ctx: ToolContext,
-  mt?: number,
-  mid?: string
-): Promise<{ membershipType: number; membershipId: string }> {
-  if (mid) {
-    if (mt === undefined) throw new Error('membershipType is required when membershipId is given.');
-    return { membershipType: mt, membershipId: mid };
-  }
-  const p = await ctx.inventory.resolvePrimary();
-  if (!p) throw new Error('No membership given and not authenticated. Run `d2-mcp auth`.');
-  return p;
-}
 
 /** Energy cost of a plug per its definition (0 if none — e.g. subclass plugs / empty sockets). */
 function plugEnergyCost(defs: Record<string, any>, hash?: number): number {
@@ -394,7 +381,7 @@ export const loadoutTools: ToolDef[] = [
   // -- Loadout slot status ---------------------------------------------------
   tool(
     'get_character_loadouts',
-    "Show a character's loadout slots and which are used / free / locked (snapshotting needs a free slot). Omit membership to use your authenticated account.",
+    "Show a character's in-game loadout slots: name and item names for used slots, plus which are free / locked (snapshotting needs a free slot). Omit membership to use your authenticated account.",
     {
       properties: {
         characterId: fields.characterId(),
@@ -409,9 +396,15 @@ export const loadoutTools: ToolDef[] = [
         a.membershipType as number | undefined,
         a.membershipId as string | undefined
       );
-      const prof = await ctx.api.getCharacterLoadouts(membershipType, membershipId);
+      const [prof, snap, names] = await Promise.all([
+        ctx.api.getCharacterLoadouts(membershipType, membershipId),
+        ctx.inventory.getOrBuild(membershipType, membershipId),
+        ctx.manifest.getAll('DestinyLoadoutNameDefinition'),
+      ]);
       const data: any[] =
         prof.Response?.characterLoadouts?.data?.[a.characterId as string]?.loadouts ?? [];
+      const loadoutName = new Map<number, string>(names.map((n) => [n.hash, n.name]));
+      const itemName = new Map(snap.items.map((i) => [i.instanceId, i.name]));
       const slots = data.map((l, i) => {
         const items = (l.items ?? []).filter(
           (it: any) => it.itemInstanceId && it.itemInstanceId !== '0'
@@ -420,7 +413,15 @@ export const loadoutTools: ToolDef[] = [
         if (l.nameHash === LOADOUT_SENTINEL) status = 'locked';
         else if (items.length > 0) status = 'used';
         else status = 'free';
-        return { index: i, status, items: items.length };
+        if (status !== 'used') return { index: i, status };
+        return {
+          index: i,
+          status,
+          name: loadoutName.get(l.nameHash),
+          items: items.map(
+            (it: any) => itemName.get(it.itemInstanceId) ?? `(missing ${it.itemInstanceId})`
+          ),
+        };
       });
       return {
         characterId: a.characterId,

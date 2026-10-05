@@ -9,9 +9,11 @@ import { authTools } from './auth.js';
 import { socialTools } from './social.js';
 import { inventoryTools } from './inventory.js';
 import { loadoutTools } from './loadout.js';
+import { accountTools } from './account.js';
 
 /** The full set of tools exposed by the server. */
 export const allTools: ToolDef[] = [
+  ...accountTools,
   ...readTools,
   ...inventoryTools,
   ...loadoutTools,

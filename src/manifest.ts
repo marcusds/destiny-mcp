@@ -55,6 +55,8 @@ export class ManifestManager {
   private inflight: Promise<void> | null = null;
   /** Per-table [id, lowercased name] lists, built lazily for name search. */
   private nameIndex = new Map<string, Array<[number, string]>>();
+  /** Whole small tables (activity modes, loadout names...) cached per version. */
+  private tableCache = new Map<string, any[]>();
 
   constructor(api: DestinyAPI, config: BungieConfig, locale = 'en') {
     this.api = api;
@@ -133,6 +135,7 @@ export class ManifestManager {
     this.db = new Database(localPath, { readonly: true, fileMustExist: true });
     this.version = version;
     this.nameIndex.clear();
+    this.tableCache.clear();
     this.tableNames = new Set(
       this.db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -255,6 +258,20 @@ export class ManifestManager {
       this.nameIndex.set(table, names);
     }
     return names;
+  }
+
+  /** Every definition in a (small) table, cached for the manifest version. */
+  async getAll(table: string): Promise<any[]> {
+    await this.ensure();
+    this.assertTable(table);
+    let rows = this.tableCache.get(table);
+    if (!rows) {
+      rows = (
+        this.requireDb().prepare(`SELECT json FROM ${table}`).all() as Array<{ json: string }>
+      ).map((r) => JSON.parse(r.json));
+      this.tableCache.set(table, rows);
+    }
+    return rows;
   }
 
   async listTables(): Promise<string[]> {

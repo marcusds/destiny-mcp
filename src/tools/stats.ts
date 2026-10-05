@@ -1,30 +1,71 @@
-import { ToolDef, tool, num, str, numArr, fields } from './registry.js';
+import { ToolDef, tool, num, str, bool, numArr, fields } from './registry.js';
+import { resolveMembership } from './membership.js';
 
 /** Activity history, historical/account stats, leaderboards, PGCR. */
 export const statsTools: ToolDef[] = [
   tool(
     'get_activity_history',
-    'Get recent activity history for a Destiny 2 character',
+    'Recent activities for a character: activity + mode names, date, duration, completion, K/D/A, and instanceId (for get_post_game_carnage_report). Omit membership to use your authenticated account; full=true returns the raw Bungie response.',
     {
       properties: {
-        membershipType: fields.membershipType(),
-        membershipId: fields.membershipId(),
         characterId: fields.characterId(),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
         count: num('Number of activities to return (default 25, max 250)'),
-        mode: num('Activity mode filter (e.g. 4=Raid, 5=AllPvP, 7=AllPvE)'),
+        mode: num('Activity mode filter (e.g. 4=Raid, 5=AllPvP, 7=AllPvE, 82=Dungeon)'),
         page: num('Page number for pagination (0-based)'),
+        full: bool('Return the raw Bungie response instead of summaries (large)'),
       },
-      required: ['membershipType', 'membershipId', 'characterId'],
+      required: ['characterId'],
     },
-    (ctx, a) =>
-      ctx.api.getActivityHistory(
-        a.membershipType as number,
-        a.membershipId as string,
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const raw = await ctx.api.getActivityHistory(
+        membershipType,
+        membershipId,
         a.characterId as string,
         (a.count as number) ?? 25,
         a.mode as number | undefined,
         a.page as number | undefined
-      )
+      );
+      if (a.full === true) return raw;
+
+      const activities: any[] = raw.Response?.activities ?? [];
+      const [activityDefs, modeDefs] = await Promise.all([
+        ctx.manifest.getDefinitions(
+          'DestinyActivityDefinition',
+          activities.map(
+            (x) => x.activityDetails?.directorActivityHash ?? x.activityDetails?.referenceId
+          )
+        ),
+        ctx.manifest.getAll('DestinyActivityModeDefinition'),
+      ]);
+      const modeName = new Map<number, string>(
+        modeDefs.map((m) => [m.modeType, m.displayProperties?.name])
+      );
+      const stat = (x: any, k: string) => x.values?.[k]?.basic?.value;
+
+      return activities.map((x) => {
+        const d = x.activityDetails ?? {};
+        const def = activityDefs[String(d.directorActivityHash ?? d.referenceId)];
+        return {
+          instanceId: d.instanceId,
+          date: x.period,
+          activity: def?.displayProperties?.name || String(d.referenceId),
+          mode: modeName.get(d.mode) ?? String(d.mode),
+          completed: stat(x, 'completed') === 1,
+          duration: x.values?.activityDurationSeconds?.basic?.displayValue,
+          kills: stat(x, 'kills'),
+          deaths: stat(x, 'deaths'),
+          assists: stat(x, 'assists'),
+          players: stat(x, 'playerCount'),
+        };
+      });
+    }
   ),
 
   tool(
