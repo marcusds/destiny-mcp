@@ -1,4 +1,4 @@
-import { ToolDef, ToolContext, tool, str, bool, fields } from './registry.js';
+import { ToolDef, ToolContext, tool, num, str, bool, fields } from './registry.js';
 import { CLASS_NAMES, resolveMembership } from './membership.js';
 
 /** DestinyRecordState flag: objectives not yet complete. */
@@ -210,7 +210,7 @@ export const accountTools: ToolDef[] = [
 
   tool(
     'get_checklist',
-    'Which individual collectibles you have found in a checklist (e.g. "Kepler Urns", "Kepler Ability Chests", "Feathers of Light", "Lost Sectors", "Region Chests"). Returns found/total, the missing entries by name/number, and (for Kepler urns/chests) the area where entries were found, learned automatically as you collect them. Omit name to list available checklists. Omit membership to use your authenticated account.',
+    'Which individual collectibles you have found in a checklist (e.g. "Kepler Urns", "Kepler Ability Chests", "Feathers of Light", "Lost Sectors", "Region Chests"). Returns found/total, the missing entries by name/number, and where entries were found (the activity you were in, plus the sub-area for Kepler urns/chests), learned automatically as you collect them. Omit name to list available checklists. Omit membership to use your authenticated account.',
     {
       properties: {
         name: str('Checklist name or part of it (omit to list all checklists)'),
@@ -261,7 +261,8 @@ export const accountTools: ToolDef[] = [
         .filter((l): l is NonNullable<typeof l> => Boolean(l))
         .map((l) => ({
           entry: l.entry,
-          ...(l.area ? { area: l.area } : { possibleAreas: l.candidates }),
+          ...(l.area ? { area: l.area } : l.candidates && { possibleAreas: l.candidates }),
+          ...(l.activity && { activity: l.activity }),
           foundAt: l.foundAt,
         }));
       return {
@@ -271,6 +272,73 @@ export const accountTools: ToolDef[] = [
         missing,
         ...(learned.length && { foundLocations: learned }),
       };
+    }
+  ),
+
+  tool(
+    'get_reputation',
+    'Faction/syndicate reputation ranks for a character (e.g. "The Pikers", "Totality Division", "Vanguard"): rank number and name, progress within the rank, and reputation still needed to reach targetRank. Defaults to your most recently played character. Omit membership to use your authenticated account.',
+    {
+      properties: {
+        name: str('Filter by faction/reputation name (substring)'),
+        targetRank: num('Rank to compute the remaining reputation for (e.g. 5)'),
+        characterId: str('Character ID (default: most recently played)'),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
+      },
+    },
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const profile = await ctx.api.getProfile(membershipType, membershipId, [200, 202]);
+      const R = profile.Response ?? {};
+      const chars: any[] = Object.values(R.characters?.data ?? {});
+      const characterId =
+        (a.characterId as string | undefined) ??
+        chars.sort((x, y) => Date.parse(y.dateLastPlayed) - Date.parse(x.dateLastPlayed))[0]
+          ?.characterId;
+      const factions: any[] = Object.values(
+        R.characterProgressions?.data?.[characterId]?.factions ?? {}
+      );
+      const defs = await ctx.manifest.getDefinitions(
+        'DestinyProgressionDefinition',
+        factions.map((f) => f.progressionHash)
+      );
+      const q = (a.name as string | undefined)?.toLowerCase();
+      const target = a.targetRank as number | undefined;
+
+      const reputations = factions
+        .map((f) => {
+          const def = defs[String(f.progressionHash)];
+          const steps: any[] = def?.steps ?? [];
+          const name: string = def?.displayProperties?.name ?? String(f.progressionHash);
+          // Rank N is step index N-1; a step's progressTotal is the rep needed to finish it.
+          const rank = f.level + 1;
+          let toTarget: number | undefined;
+          if (target !== undefined) {
+            toTarget = 0;
+            if (rank < target) {
+              toTarget = f.nextLevelAt - f.progressToNextLevel;
+              for (let i = f.level + 1; i < target - 1; i++) {
+                toTarget += steps[Math.min(i, steps.length - 1)]?.progressTotal ?? 0;
+              }
+            }
+          }
+          return {
+            name,
+            rank,
+            rankName: steps[Math.min(f.level, steps.length - 1)]?.stepName || undefined,
+            progress: `${f.progressToNextLevel}/${f.nextLevelAt}`,
+            total: f.currentProgress,
+            ...(toTarget !== undefined && { [`toRank${target}`]: toTarget }),
+          };
+        })
+        .filter((r) => !q || r.name.toLowerCase().includes(q))
+        .sort((x, y) => x.name.localeCompare(y.name));
+      return { characterId, reputations };
     }
   ),
 ];

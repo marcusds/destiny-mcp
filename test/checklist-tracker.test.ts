@@ -91,3 +91,50 @@ test('records candidates when several areas rose together, and persists', async 
   const reloaded = setup(dataDir).tracker;
   assert.deepEqual(reloaded.locationOf(2)?.candidates?.length, 2);
 });
+
+test('any checklist records the activity a find happened in', async () => {
+  const dataDir = tempDir();
+  const tapes = {
+    hash: 60,
+    displayProperties: { name: 'Renegades Tapes' },
+    entries: [{ hash: 9, displayProperties: { name: 'Renegades Tape #1' } }],
+  };
+  let found = false;
+  const api: any = {
+    getProfile: async () => ({
+      Response: {
+        profileProgression: { data: { checklists: { 60: { 9: found } } } },
+        profileRecords: { data: { records: {} } },
+        characterActivities: {
+          data: { c1: { currentActivityHash: 500, dateActivityStarted: '2026-10-05T00:00:00Z' } },
+        },
+      },
+    }),
+  };
+  const manifest: any = {
+    getAll: async (t: string) => (t === 'DestinyChecklistDefinition' ? [tapes] : []),
+    getDefinitions: async () => ({}),
+    getDefinition: async (t: string) =>
+      t === 'DestinyActivityDefinition'
+        ? { displayProperties: { name: 'Lawless Frontier' }, destinationHash: 1 }
+        : { displayProperties: { name: 'Tharsis' } },
+  };
+  const inventory: any = { resolvePrimary: async () => ({ membershipType: 3, membershipId: 'm' }) };
+  const tracker = new ChecklistTracker(api, manifest, {} as any, inventory, {
+    apiKey: '',
+    baseUrl: '',
+    dataDir,
+  });
+  await tracker.observe();
+  found = true;
+  await tracker.observe();
+  assert.deepEqual(
+    { ...tracker.locationOf(9), foundAt: undefined },
+    {
+      checklist: 'Renegades Tapes',
+      entry: 'Renegades Tape #1',
+      activity: 'Lawless Frontier (Tharsis)',
+      foundAt: undefined,
+    }
+  );
+});

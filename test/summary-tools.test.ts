@@ -249,3 +249,75 @@ test('get_checklist shows the same read the tracker used for your own account', 
   };
   assert.equal((await run('get_checklist', ctx, { name: 'urns' })).found, 0);
 });
+
+test('get_reputation reports rank names and reputation needed for a target rank', async () => {
+  const ctx: any = {
+    inventory: { resolvePrimary: async () => primary },
+    api: {
+      getProfile: async () => ({
+        Response: {
+          characters: {
+            data: { c1: { characterId: 'c1', dateLastPlayed: '2026-10-05T00:00:00Z' } },
+          },
+          characterProgressions: {
+            data: {
+              c1: {
+                factions: {
+                  1: {
+                    progressionHash: 639915560,
+                    level: 1,
+                    progressToNextLevel: 260,
+                    nextLevelAt: 2000,
+                    currentProgress: 1260,
+                  },
+                  2: {
+                    progressionHash: 77,
+                    level: 4,
+                    progressToNextLevel: 220,
+                    nextLevelAt: 2000,
+                    currentProgress: 10220,
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+    },
+    manifest: {
+      getDefinitions: async () => ({
+        639915560: {
+          displayProperties: { name: 'The Pikers' },
+          steps: [1000, 2000, 3000, 4000, 2000].map((t, i) => ({
+            progressTotal: t,
+            stepName: ['Nobody', 'Acquaintance', 'Friend', 'Confidant', 'Family'][i],
+          })),
+        },
+        77: {
+          displayProperties: { name: 'Tharsis Reformation' },
+          steps: [{ progressTotal: 2000, stepName: 'X' }],
+        },
+      }),
+    },
+  };
+  const out = await run('get_reputation', ctx, { targetRank: 5 });
+  assert.deepEqual(out.reputations, [
+    {
+      name: 'Tharsis Reformation',
+      rank: 5,
+      rankName: 'X',
+      progress: '220/2000',
+      total: 10220,
+      toRank5: 0,
+    },
+    // Rank 2 -> 5: finish Acquaintance (1740) + Friend (3000) + Confidant (4000)
+    {
+      name: 'The Pikers',
+      rank: 2,
+      rankName: 'Acquaintance',
+      progress: '260/2000',
+      total: 1260,
+      toRank5: 8740,
+    },
+  ]);
+});

@@ -7,8 +7,9 @@ import { ManifestManager } from './manifest.js';
 import { InventoryCache } from './inventory.js';
 
 /**
- * Checklists whose entries we try to locate, and the triumphs whose per-area
- * objective counters ("Stacks urns found") reveal where an entry was picked up.
+ * Checklists that also have triumphs with per-area objective counters
+ * ("Stacks urns found"), which pin a find to a sub-area. Every other checklist
+ * is still tracked, located by the activity the player was in.
  */
 const TRACKED: Array<{ checklist: string; records: RegExp; area: RegExp }> = [
   { checklist: 'Kepler Urns', records: /^Urn Collection:/, area: /^(.+) urns found$/i },
@@ -26,8 +27,13 @@ export interface EntryLocation {
   area?: string;
   /** Possible areas when several counters moved in the same observation. */
   candidates?: string[];
+  /** Activity (and destination) the player was in when it was found. */
+  activity?: string;
   foundAt: string;
 }
+
+/** How long after leaving an activity a late-arriving find is still attributed to it. */
+const ACTIVITY_GRACE_MS = 10 * 60_000;
 
 interface TrackerState {
   /** checklist hash -> entry hashes found at the last observation */
@@ -39,9 +45,10 @@ interface TrackerState {
 }
 
 /**
- * Learns where checklist collectibles (Kepler urns/chests) are found by
- * diffing successive observations: an entry that flips to found at the same
- * time as exactly one area's triumph counter rises was found in that area.
+ * Learns where checklist collectibles are found by diffing successive
+ * observations. Every newly found entry records the activity the player was in;
+ * for checklists in TRACKED, an entry that flips at the same time as exactly one
+ * area's triumph counter rises is also pinned to that area.
  * Polls frequently while the player is in an activity so pickups stay
  * separable; results persist to disk.
  */
@@ -50,6 +57,8 @@ export class ChecklistTracker {
   private state: TrackerState = { found: {}, areas: {}, locations: {} };
   private timer?: NodeJS.Timeout;
   private observing: Promise<any> | null = null;
+  /** Most recent activity seen while polling, for finds Bungie reports late. */
+  private lastActivity?: { name: string; at: number };
 
   constructor(
     private api: DestinyAPI,
@@ -89,10 +98,10 @@ export class ChecklistTracker {
       const p = await this.inventory.resolvePrimary();
       if (!p) return;
       const acts = await this.api.getProfile(p.membershipType, p.membershipId, [204]);
-      const playing = Object.values<any>(acts.Response?.characterActivities?.data ?? {}).some(
-        (c) => c.currentActivityHash
-      );
-      if (playing) await this.observe();
+      const playing = await this.noteActivity(acts.Response);
+      // Keep observing briefly after leaving: Bungie can report a pickup late.
+      const recent = this.lastActivity && Date.now() - this.lastActivity.at < ACTIVITY_GRACE_MS;
+      if (playing || recent) await this.observe();
     } catch (error) {
       console.error(
         '[checklists] poll failed:',
@@ -117,7 +126,7 @@ export class ChecklistTracker {
     const p = await this.inventory.resolvePrimary();
     if (!p) return undefined;
     const [profile, checklists, records] = await Promise.all([
-      this.api.getProfile(p.membershipType, p.membershipId, [104, 900]),
+      this.api.getProfile(p.membershipType, p.membershipId, [104, 204, 900]),
       this.manifest.getAll('DestinyChecklistDefinition'),
       this.manifest.getAll('DestinyRecordDefinition'),
     ]);
@@ -125,42 +134,69 @@ export class ChecklistTracker {
     const checklistState: Record<string, Record<string, boolean>> = R.profileProgression?.data
       ?.checklists ?? {};
     const recordState: Record<string, any> = R.profileRecords?.data?.records ?? {};
+    await this.noteActivity(R);
+    const activity =
+      this.lastActivity && Date.now() - this.lastActivity.at < ACTIVITY_GRACE_MS
+        ? this.lastActivity.name
+        : undefined;
+    const now = new Date().toISOString();
 
-    for (const t of TRACKED) {
-      const def = checklists.find((c) => c.displayProperties?.name === t.checklist);
-      if (!def) continue;
+    for (const def of checklists) {
       const key = String(def.hash);
-      const states = checklistState[key] ?? {};
+      const states = checklistState[key];
+      if (!states) continue; // character-scoped or not on this profile
       const found = (def.entries ?? [])
         .filter((e: any) => states[String(e.hash)])
         .map((e: any) => String(e.hash));
+      const t = TRACKED.find((x) => x.checklist === def.displayProperties?.name);
+      const areas = t ? await this.areaCounts(records, recordState, t) : undefined;
 
-      const areas = await this.areaCounts(records, recordState, t);
       const prevFound = this.state.found[key];
-      const prevAreas = this.state.areas[key];
-      if (prevFound && prevAreas) {
-        const newly = found.filter((h: string) => !prevFound.includes(h));
-        const rose = Object.keys(areas).filter((a) => areas[a] > (prevAreas[a] ?? 0));
-        const now = new Date().toISOString();
-        for (const h of newly) {
+      if (prevFound) {
+        const prevAreas = this.state.areas[key] ?? {};
+        const rose = areas ? Object.keys(areas).filter((a) => areas[a] > (prevAreas[a] ?? 0)) : [];
+        for (const h of found.filter((x: string) => !prevFound.includes(x))) {
           const entry = def.entries.find((e: any) => String(e.hash) === h);
           this.state.locations[h] = {
-            checklist: t.checklist,
+            checklist: def.displayProperties?.name ?? key,
             entry: entry?.displayProperties?.name ?? h,
             ...(rose.length === 1
               ? { area: rose[0] }
               : rose.length > 1
                 ? { candidates: rose }
                 : {}),
+            ...(activity && { activity }),
             foundAt: now,
           };
         }
       }
       this.state.found[key] = found;
-      this.state.areas[key] = areas;
+      if (areas) this.state.areas[key] = areas;
     }
     this.save();
     return profile;
+  }
+
+  /** Remember the activity a character is in; returns whether anyone is playing. */
+  private async noteActivity(R: any): Promise<boolean> {
+    const current = Object.values<any>(R?.characterActivities?.data ?? {})
+      .filter((c) => c.currentActivityHash)
+      .sort((x, y) => Date.parse(y.dateActivityStarted) - Date.parse(x.dateActivityStarted))[0];
+    if (!current) return false;
+    const def = await this.manifest.getDefinition(
+      'DestinyActivityDefinition',
+      current.currentActivityHash
+    );
+    const dest = def?.destinationHash
+      ? await this.manifest.getDefinition('DestinyDestinationDefinition', def.destinationHash)
+      : undefined;
+    const name: string = def?.displayProperties?.name || String(current.currentActivityHash);
+    const destName: string | undefined = dest?.displayProperties?.name;
+    this.lastActivity = {
+      name: destName && destName !== name ? `${name} (${destName})` : name,
+      at: Date.now(),
+    };
+    return true;
   }
 
   /** area name -> current progress, from the tracked triumphs' objectives. */
