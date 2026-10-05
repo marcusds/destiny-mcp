@@ -47,6 +47,21 @@ export interface ArmorRow {
   hash: number;
 }
 
+/**
+ * How long a write we made overrides Bungie's reads. While the player is in-game,
+ * profile reads lag the live game state, so a refresh right after a transfer or
+ * equip still shows the old locations.
+ */
+const PENDING_TTL_MS = 5 * 60_000;
+
+/** Where a write we made put an item, until Bungie's reads agree. */
+interface PendingMove {
+  location: string;
+  characterId?: string;
+  character?: string;
+  at: number;
+}
+
 /** Bump when ArmorRow changes shape so stale on-disk snapshots are rebuilt. */
 const ARMOR_SCHEMA = 2;
 
@@ -89,6 +104,8 @@ export class InventoryCache {
   private primary?: { membershipType: number; membershipId: string };
   /** Bungie.net account `primary` was resolved for (re-resolve if it changes). */
   private primaryFor?: string | null;
+  /** membership key -> instanceId -> move not yet visible in Bungie's reads. */
+  private pending = new Map<string, Map<string, PendingMove>>();
 
   constructor(
     private api: DestinyAPI,
@@ -210,6 +227,7 @@ export class InventoryCache {
       };
     });
     items.sort((a, b) => a.name.localeCompare(b.name));
+    this.reconcilePending(this.key(membershipType, membershipId), items);
 
     const snap: InventorySnapshot = {
       membershipType,
@@ -220,6 +238,122 @@ export class InventoryCache {
     this.snapshots.set(this.key(membershipType, membershipId), snap);
     this.saveToDisk(snap);
     return snap;
+  }
+
+  // -- Local write tracking -----------------------------------------------
+
+  /**
+   * Record that an item was moved to the vault or a character. Call only after
+   * Bungie accepted the write. Updates cached snapshots now and keeps overriding
+   * lagging refreshes until Bungie's data agrees (or PENDING_TTL_MS passes).
+   */
+  noteTransfer(
+    membershipType: number,
+    itemId: string,
+    toVault: boolean,
+    characterId: string,
+    membershipId?: string
+  ): void {
+    const key = this.findKey(membershipType, itemId, membershipId);
+    if (!key) return;
+    this.applyMoves(key, [
+      toVault
+        ? { instanceId: itemId, location: 'vault' }
+        : { instanceId: itemId, location: 'inventory', characterId },
+    ]);
+  }
+
+  /** Record successful equips; whatever was equipped in those slots moves to inventory. */
+  noteEquip(
+    membershipType: number,
+    characterId: string,
+    itemIds: string[],
+    membershipId?: string
+  ): void {
+    const key = itemIds.length ? this.findKey(membershipType, itemIds[0], membershipId) : undefined;
+    const snap = key ? this.snapshots.get(key) : undefined;
+    if (!key || !snap) return;
+    const moves: Array<{ instanceId: string; location: string; characterId?: string }> = [];
+    for (const id of itemIds) {
+      const row = snap.items.find((r) => r.instanceId === id);
+      if (!row) continue;
+      const displaced = snap.items.find(
+        (r) =>
+          r.location === 'equipped' &&
+          r.characterId === characterId &&
+          r.bucketHash === row.bucketHash &&
+          r.instanceId !== id &&
+          !itemIds.includes(r.instanceId!)
+      );
+      if (displaced)
+        moves.push({ instanceId: displaced.instanceId!, location: 'inventory', characterId });
+      moves.push({ instanceId: id, location: 'equipped', characterId });
+    }
+    this.applyMoves(key, moves);
+  }
+
+  /** Instance IDs whose recorded moves Bungie's reads don't show yet. */
+  pendingIds(membershipType: number, membershipId: string): Set<string> {
+    return new Set(this.pending.get(this.key(membershipType, membershipId))?.keys() ?? []);
+  }
+
+  private findKey(
+    membershipType: number,
+    itemId: string,
+    membershipId?: string
+  ): string | undefined {
+    if (membershipId) return this.key(membershipType, membershipId);
+    for (const [key, snap] of this.snapshots) {
+      if (
+        snap.membershipType === membershipType &&
+        snap.items.some((r) => r.instanceId === itemId)
+      ) {
+        return key;
+      }
+    }
+    return undefined;
+  }
+
+  private applyMoves(
+    key: string,
+    moves: Array<{ instanceId: string; location: string; characterId?: string }>
+  ): void {
+    const snap = this.snapshots.get(key);
+    const className = (cid?: string) =>
+      cid ? snap?.items.find((r) => r.characterId === cid && r.character)?.character : undefined;
+    let pending = this.pending.get(key);
+    if (!pending) this.pending.set(key, (pending = new Map()));
+    for (const m of moves) {
+      pending.set(m.instanceId, {
+        location: m.location,
+        characterId: m.characterId,
+        character: className(m.characterId),
+        at: Date.now(),
+      });
+    }
+    if (snap) {
+      for (const row of snap.items) applyMove(row, pending.get(row.instanceId!));
+      this.saveToDisk(snap);
+    }
+    const armor = this.armorSnapshots.get(key);
+    if (armor) {
+      for (const row of armor.armor) applyArmorMove(row, pending.get(row.instanceId));
+      this.saveArmorToDisk(armor);
+    }
+  }
+
+  /** Drop moves Bungie now reflects (or that expired); re-apply the rest to fresh rows. */
+  private reconcilePending(key: string, items: InventoryRow[]): void {
+    const pending = this.pending.get(key);
+    if (!pending) return;
+    const now = Date.now();
+    for (const [id, move] of pending) {
+      const row = items.find((r) => r.instanceId === id);
+      const confirmed =
+        row && row.location === move.location && row.characterId === move.characterId;
+      if (confirmed || now - move.at > PENDING_TTL_MS) pending.delete(id);
+      else if (row) applyMove(row, move);
+    }
   }
 
   // -- Armor snapshot (stats + tier + energy) -----------------------------
@@ -336,6 +470,8 @@ export class InventoryCache {
       })
       .filter((r): r is ArmorRow => r !== null);
     armor.sort((a, b) => (b.tier ?? 0) - (a.tier ?? 0) || a.name.localeCompare(b.name));
+    const pending = this.pending.get(this.key(membershipType, membershipId));
+    if (pending) for (const row of armor) applyArmorMove(row, pending.get(row.instanceId));
 
     const snap: ArmorSnapshot = {
       schema: ARMOR_SCHEMA,
@@ -401,6 +537,20 @@ export class InventoryCache {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
   }
+}
+
+function applyMove(row: InventoryRow, move: PendingMove | undefined): void {
+  if (!move) return;
+  row.location = move.location;
+  row.characterId = move.characterId;
+  row.character = move.character;
+}
+
+function applyArmorMove(row: ArmorRow, move: PendingMove | undefined): void {
+  if (!move) return;
+  row.location = move.location;
+  row.equipped = move.location === 'equipped';
+  row.character = move.character;
 }
 
 function toRaw(

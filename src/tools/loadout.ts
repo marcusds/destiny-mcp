@@ -130,14 +130,15 @@ const NO_ROOM = /NoRoomInDestination|1642/;
 async function stageLoadoutItems(
   ctx: ToolContext,
   membershipType: number,
+  membershipId: string,
   characterId: string,
   loadoutIds: Set<string>,
   rows: InventoryRow[]
 ): Promise<{ moved: string[]; problems: string[] }> {
   const moved: string[] = [];
   const problems: string[] = [];
-  const transfer = (row: InventoryRow, toVault: boolean, charId: string) =>
-    ctx.api.transferItem({
+  const transfer = async (row: InventoryRow, toVault: boolean, charId: string) => {
+    await ctx.api.transferItem({
       itemReferenceHash: row.hash,
       stackSize: 1,
       transferToVault: toVault,
@@ -145,6 +146,8 @@ async function stageLoadoutItems(
       characterId: charId,
       membershipType,
     });
+    ctx.inventory.noteTransfer(membershipType, row.instanceId!, toVault, charId, membershipId);
+  };
 
   /** Move one spare item out of `bucketHash` on the target character. */
   const makeRoom = async (bucketHash: number | undefined): Promise<boolean> => {
@@ -160,7 +163,7 @@ async function stageLoadoutItems(
     await transfer(spare, true, characterId);
     spare.location = 'vault';
     spare.characterId = undefined;
-    moved.push(`${spare.name} -> vault (to make room)`);
+    moved.push(`${spare.name} (${spare.instanceId}) -> vault (to make room)`);
     return true;
   };
 
@@ -190,9 +193,12 @@ async function stageLoadoutItems(
       }
       row.location = 'inventory';
       row.characterId = characterId;
-      moved.push(`${row.name} -> character`);
+      moved.push(`${row.name} (${row.instanceId}) -> character`);
     } catch (e) {
-      problems.push(`${row.name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      // A stale snapshot can point at a place the item already left.
+      const hint = /DestinyItemNotFound/.test(msg) ? ' (it may already have moved)' : '';
+      problems.push(`${row.name}: ${msg}${hint}`);
     }
   }
   return { moved, problems };
@@ -238,28 +244,34 @@ export const loadoutTools: ToolDef[] = [
       const { moved, problems } = await stageLoadoutItems(
         ctx,
         membershipType,
+        membershipId,
         characterId,
         loadoutIds,
         rows
       );
       await ctx.api.equipLoadout({ loadoutIndex, characterId, membershipType });
-
-      // Verify against a fresh read; Bungie reports success even for partial equips.
-      const after = await ctx.inventory.refresh(membershipType, membershipId);
-      const equipped = new Set(
-        after.items
-          .filter((r) => r.location === 'equipped' && r.characterId === characterId)
-          .map((r) => r.instanceId)
+      // Bungie only equips loadout items that are on the character.
+      const staged = [...loadoutIds].filter(
+        (id) => rows.find((r) => r.instanceId === id)?.characterId === characterId
       );
+      ctx.inventory.noteEquip(membershipType, characterId, staged, membershipId);
+
+      // Re-read: recorded moves that Bungie's data now shows are confirmed; the
+      // rest are accepted but not yet visible (reads lag while you're in-game).
+      await ctx.inventory.refresh(membershipType, membershipId);
+      const pending = ctx.inventory.pendingIds(membershipType, membershipId);
       const name = (id: string) => rows.find((r) => r.instanceId === id)?.name ?? id;
-      const notEquipped = [...loadoutIds].filter((id) => !equipped.has(id)).map(name);
+      const notStaged = [...loadoutIds].filter((id) => !staged.includes(id));
       return {
         loadoutIndex,
-        equipped: loadoutIds.size - notEquipped.length,
-        total: loadoutIds.size,
+        confirmed: staged.filter((id) => !pending.has(id)).map(name),
+        unconfirmed: staged.filter((id) => pending.has(id)).map(name),
+        notEquipped: notStaged.map(name),
         moved,
-        notEquipped,
         problems,
+        ...(staged.some((id) => pending.has(id)) && {
+          note: "Bungie accepted these but its profile data hasn't caught up yet (normal while you're in-game); check in-game or call again shortly.",
+        }),
       };
     },
     { write: true }

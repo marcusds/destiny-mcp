@@ -69,15 +69,23 @@ export const actionTools: ToolDef[] = [
       },
       required: ['itemReferenceHash', 'itemId', 'transferToVault', 'characterId', 'membershipType'],
     },
-    (ctx, a) =>
-      ctx.api.transferItem({
+    async (ctx, a) => {
+      const result = await ctx.api.transferItem({
         itemReferenceHash: a.itemReferenceHash as number,
         itemId: a.itemId as string,
         stackSize: (a.stackSize as number) ?? 1,
         transferToVault: a.transferToVault as boolean,
         characterId: a.characterId as string,
         membershipType: a.membershipType as number,
-      }),
+      });
+      ctx.inventory.noteTransfer(
+        a.membershipType as number,
+        a.itemId as string,
+        a.transferToVault as boolean,
+        a.characterId as string
+      );
+      return result;
+    },
     { write: true }
   ),
 
@@ -94,14 +102,22 @@ export const actionTools: ToolDef[] = [
       },
       required: ['itemReferenceHash', 'itemId', 'characterId', 'membershipType'],
     },
-    (ctx, a) =>
-      ctx.api.pullFromPostmaster({
+    async (ctx, a) => {
+      const result = await ctx.api.pullFromPostmaster({
         itemReferenceHash: a.itemReferenceHash as number,
         itemId: a.itemId as string,
         stackSize: (a.stackSize as number) ?? 1,
         characterId: a.characterId as string,
         membershipType: a.membershipType as number,
-      }),
+      });
+      ctx.inventory.noteTransfer(
+        a.membershipType as number,
+        a.itemId as string,
+        false,
+        a.characterId as string
+      );
+      return result;
+    },
     { write: true }
   ),
 
@@ -116,12 +132,17 @@ export const actionTools: ToolDef[] = [
       },
       required: ['itemId', 'characterId', 'membershipType'],
     },
-    (ctx, a) =>
-      ctx.api.equipItem({
+    async (ctx, a) => {
+      const result = await ctx.api.equipItem({
         itemId: a.itemId as string,
         characterId: a.characterId as string,
         membershipType: a.membershipType as number,
-      }),
+      });
+      ctx.inventory.noteEquip(a.membershipType as number, a.characterId as string, [
+        a.itemId as string,
+      ]);
+      return result;
+    },
     { write: true }
   ),
 
@@ -136,12 +157,19 @@ export const actionTools: ToolDef[] = [
       },
       required: ['itemIds', 'characterId', 'membershipType'],
     },
-    (ctx, a) =>
-      ctx.api.equipItems({
+    async (ctx, a) => {
+      const result = await ctx.api.equipItems({
         itemIds: a.itemIds as string[],
         characterId: a.characterId as string,
         membershipType: a.membershipType as number,
-      }),
+      });
+      // equipStatus 1 = Success; record only the items Bungie actually equipped.
+      const ok = (result.Response?.equipResults ?? [])
+        .filter((r: any) => r.equipStatus === 1)
+        .map((r: any) => r.itemInstanceId as string);
+      ctx.inventory.noteEquip(a.membershipType as number, a.characterId as string, ok);
+      return result;
+    },
     { write: true }
   ),
 

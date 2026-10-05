@@ -65,7 +65,7 @@ export const inventoryTools: ToolDef[] = [
         count: page.length,
         offset,
         limit,
-        items: page,
+        items: page.map(({ bucketHash: _bucket, ...row }) => row),
       };
     }
   ),

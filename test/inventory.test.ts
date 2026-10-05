@@ -61,6 +61,7 @@ function setup(dataDir = tempDir()) {
             name: defs[h].displayProperties.name,
             itemType: defs[h].itemTypeDisplayName,
             tier: defs[h].inventory.tierTypeName,
+            bucketHash: defs[h].inventory.bucketTypeHash,
           },
         ])
       ),
@@ -121,4 +122,76 @@ test('armor snapshots from an older schema are ignored on load', async () => {
   delete old.schema;
   fs.writeFileSync(file, JSON.stringify(old));
   assert.equal(setup(dataDir).cache.getArmorSnapshot(3, 'm1'), undefined);
+});
+
+/** Profile where item i1 is in the vault and i2 is equipped on the Warlock (c1). */
+function profileWith(i1: { location: number; on?: string }, i2Equipped = true) {
+  const char = (cid: string) => ({
+    items: [
+      ...(i1.on === cid ? [{ itemHash: 10, itemInstanceId: 'i1', location: 1 }] : []),
+      ...(!i2Equipped && cid === 'c1' ? [{ itemHash: 20, itemInstanceId: 'i2', location: 1 }] : []),
+    ],
+  });
+  return {
+    Response: {
+      ...profile.Response,
+      profileInventory: {
+        data: {
+          items: i1.on ? [] : [{ itemHash: 10, itemInstanceId: 'i1', location: i1.location }],
+        },
+      },
+      characterInventories: { data: { c1: char('c1') } },
+      characterEquipment: {
+        data: {
+          c1: { items: i2Equipped ? [{ itemHash: 20, itemInstanceId: 'i2', location: 1 }] : [] },
+        },
+      },
+    },
+  };
+}
+
+test('recorded writes survive lagging refreshes until Bungie agrees', async () => {
+  const { cache } = setup();
+  let current: any = profileWith({ location: 2 }); // i1 in vault
+  (cache as any).api.getInventoryProfile = async () => current;
+  await cache.refresh(3, 'm1');
+
+  cache.noteTransfer(3, 'i1', false, 'c1'); // we moved i1 to the Warlock
+  const loc = () => cache.get(3, 'm1')!.items.find((r) => r.instanceId === 'i1');
+  assert.equal(loc()?.location, 'inventory');
+  assert.equal(loc()?.character, 'Warlock');
+
+  await cache.refresh(3, 'm1'); // Bungie still says vault (stale)
+  assert.equal(loc()?.location, 'inventory');
+  assert.deepEqual([...cache.pendingIds(3, 'm1')], ['i1']);
+
+  current = profileWith({ location: 1, on: 'c1' }); // Bungie caught up
+  await cache.refresh(3, 'm1');
+  assert.equal(loc()?.characterId, 'c1');
+  assert.equal(cache.pendingIds(3, 'm1').size, 0);
+});
+
+test('equipping displaces the item previously equipped in that slot', async () => {
+  const { cache } = setup();
+  (cache as any).api.getInventoryProfile = async () => profileWith({ location: 1, on: 'c1' });
+  defs[10].inventory.bucketTypeHash = HELMET_BUCKET; // i1 is another helmet
+  try {
+    await cache.refresh(3, 'm1');
+    cache.noteEquip(3, 'c1', ['i1']);
+    const rows = cache.get(3, 'm1')!.items;
+    assert.equal(rows.find((r) => r.instanceId === 'i1')?.location, 'equipped');
+    assert.equal(rows.find((r) => r.instanceId === 'i2')?.location, 'inventory');
+  } finally {
+    delete defs[10].inventory.bucketTypeHash;
+  }
+});
+
+test('recorded writes expire so Bungie wins eventually', async (t) => {
+  const { cache } = setup();
+  (cache as any).api.getInventoryProfile = async () => profileWith({ location: 2 });
+  await cache.refresh(3, 'm1');
+  cache.noteTransfer(3, 'i1', false, 'c1');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 6 * 60_000 });
+  await cache.refresh(3, 'm1');
+  assert.equal(cache.get(3, 'm1')!.items.find((r) => r.instanceId === 'i1')?.location, 'vault');
 });

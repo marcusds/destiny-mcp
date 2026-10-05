@@ -26,6 +26,9 @@ function fakeAccount(world: Row[], opts: { helmetSlotsFree: number }) {
     inventory: {
       resolvePrimary: async () => ({ membershipType: 3, membershipId: 'm' }),
       refresh: async () => ({ items: world.map((r) => ({ ...r })) }),
+      noteTransfer: () => {},
+      noteEquip: () => {},
+      pendingIds: () => new Set<string>(),
     },
     api: {
       getCharacterLoadouts: async () => ({
@@ -131,7 +134,8 @@ test('equip_loadout stages vault and other-character items, making room when ful
   ]);
   assert.deepEqual(out.notEquipped, []);
   assert.deepEqual(out.problems, []);
-  assert.equal(out.equipped, 3);
+  assert.equal(out.confirmed.length, 3);
+  assert.match(out.moved.join(' '), /AION Adapter Mask \(helm\) -> character/);
 });
 
 test('equip_loadout reports items it could not stage instead of claiming success', async () => {
@@ -167,8 +171,46 @@ test('equip_loadout reports items it could not stage instead of claiming success
     .get('equip_loadout')!
     .handler(ctx, { loadoutIndex: 0, characterId: HUNTER });
 
-  assert.equal(out.equipped, 1);
+  assert.deepEqual(out.confirmed, ["Khepri's Sting"]);
   assert.deepEqual(out.notEquipped.sort(), ['AION Adapter Mask', 'VS Chill Inhibitor']);
   assert.equal(out.problems.length, 2);
   assert.match(out.problems.join(' '), /equipped on your Titan/);
+});
+
+test('equip_loadout reports accepted-but-not-yet-visible items as unconfirmed', async () => {
+  const world: Row[] = [
+    {
+      instanceId: 'helm',
+      name: 'AION Adapter Mask',
+      hash: 10,
+      location: 'vault',
+      bucketHash: HELMET,
+    },
+    {
+      instanceId: 'gun',
+      name: 'VS Chill Inhibitor',
+      hash: 11,
+      location: 'inventory',
+      characterId: HUNTER,
+      character: 'Hunter',
+      bucketHash: KINETIC,
+    },
+    {
+      instanceId: 'held',
+      name: "Khepri's Sting",
+      hash: 12,
+      location: 'inventory',
+      characterId: HUNTER,
+      character: 'Hunter',
+      bucketHash: 3,
+    },
+  ];
+  const { ctx } = fakeAccount(world, { helmetSlotsFree: 1 });
+  ctx.inventory.pendingIds = () => new Set(['helm']); // Bungie's read still lags for the helmet
+  const out: any = await toolMap
+    .get('equip_loadout')!
+    .handler(ctx, { loadoutIndex: 0, characterId: HUNTER });
+  assert.deepEqual(out.unconfirmed, ['AION Adapter Mask']);
+  assert.equal(out.confirmed.length, 2);
+  assert.match(out.note, /hasn't caught up/);
 });
