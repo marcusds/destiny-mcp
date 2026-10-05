@@ -4,13 +4,14 @@ import { Command } from 'commander';
 import { runStdioServer, runHttpServer } from './server.js';
 import { BungieAuth } from './auth.js';
 import { loadConfig } from './config.js';
+import { VERSION } from './version.js';
 
 const program = new Command();
 
 program
   .name('d2-mcp')
   .description('Comprehensive MCP server for the Bungie.net Destiny 2 API')
-  .version('2.0.0');
+  .version(VERSION);
 
 program
   .command('stdio')

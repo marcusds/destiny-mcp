@@ -790,7 +790,7 @@ function toBungieError(error: unknown): unknown {
 }
 
 /** A path segment that has already been URL-encoded (free text such as names). */
-class EncodedSegment {
+export class EncodedSegment {
   constructor(readonly value: string) {}
 }
 
@@ -799,7 +799,7 @@ class EncodedSegment {
  * Bungie's server URL-decodes %2F and %2E before routing, so encoding alone
  * can't stop traversal — reject separators, '%', and dot-only segments.
  */
-function text(value: string): EncodedSegment {
+export function text(value: string): EncodedSegment {
   if (/[/\\%]/.test(value) || /^[.\s]*$/.test(value)) {
     throw new Error(`Invalid path text: ${JSON.stringify(value)}`);
   }
@@ -812,7 +812,7 @@ function text(value: string): EncodedSegment {
  * possibly from prompt-injected tool args) is rejected instead of letting it
  * reach a different endpoint with the user's bearer token.
  */
-function path(strings: TemplateStringsArray, ...values: unknown[]): string {
+export function path(strings: TemplateStringsArray, ...values: unknown[]): string {
   let out = strings[0];
   values.forEach((value, i) => {
     let segment: string;

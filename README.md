@@ -43,6 +43,7 @@ Tools tagged `[auth]` require an OAuth login; `[write]` tools mutate live game s
    cp .env.example .env   # fill in BUNGIE_API_KEY (+ OAuth vars for auth tools)
    npm install
    npm run build
+   npm test               # optional: unit + transport tests (no network or Bungie account needed)
    ```
 
 ## Running
@@ -90,17 +91,18 @@ for a long-running container. Stdio clients that spawn the binary should use `no
 ```bash
 cp .env.example .env       # fill in BUNGIE_API_KEY (+ OAuth vars)
 docker compose up -d --build
-# Streamable HTTP:  http://localhost:3000/mcp   (point Archon / modern clients here)
-# WebSocket:        ws://localhost:3000
+# Streamable HTTP:  http://localhost:3737/mcp   (point Archon / modern clients here)
+# WebSocket:        ws://localhost:3737
 ```
 
-- **Binding:** the port is published on **all interfaces (`0.0.0.0`)** by default. The WebSocket
-  transport has no authentication and stored OAuth tokens permit account writes, so anyone who can
-  reach this host+port has full access — keep it on a trusted/firewalled network or front it with an
-  authenticating proxy. Set `D2_MCP_BIND=127.0.0.1` to restrict it to loopback.
-- **Port:** override the host port with `D2_MCP_PORT=3737 docker compose up -d` if 3000 is taken.
+- **Binding:** host port `3737` is published on **all interfaces (`0.0.0.0`)** by default. Stored
+  OAuth tokens permit account writes, so without `D2_MCP_AUTH_TOKEN` anyone who can reach this
+  host+port has full access. Set `D2_MCP_BIND=127.0.0.1` to restrict it to loopback.
 - **Auth:** set `D2_MCP_AUTH_TOKEN` in `.env` to require `Authorization: Bearer <token>` on both
-  transports — strongly recommended whenever the port is reachable off-host.
+  transports — strongly recommended whenever the port is reachable off-host. Requests carrying a
+  browser `Origin` header are rejected unless listed in `D2_MCP_ALLOWED_ORIGINS`.
+- **Sessions:** idle Streamable HTTP sessions are closed after `D2_MCP_SESSION_IDLE_MINUTES`
+  (default 30); clients transparently re-initialize.
 - **Persistence:** tokens + the ~350 MB SQLite manifest cache live in the named volume `d2-data`
   (mounted at `/data`), so they survive restarts and image rebuilds.
 - **Credentials** are read from `.env` via `env_file` — they are never baked into the image

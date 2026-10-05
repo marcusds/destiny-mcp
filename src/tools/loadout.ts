@@ -49,6 +49,86 @@ function assertEnergyFits(opts: {
   }
 }
 
+/**
+ * Live socket state for one item plus everything needed to pick plugs by name:
+ * current plugs (305), reusable plugs (310), instance energy (300), the item's
+ * socket entries and plugSets from the manifest, and resolved plug definitions.
+ * `onlySocket` limits candidate resolution to a single socket index.
+ */
+async function loadItemSockets(
+  ctx: ToolContext,
+  membershipType: number,
+  membershipId: string,
+  itemId: string,
+  onlySocket?: number
+) {
+  const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310, 300]);
+  const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
+  const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
+  const energy = item.Response?.instance?.data?.energy as
+    | { energyCapacity?: number; energyUsed?: number }
+    | undefined;
+
+  // Resolve the item's definition hash (for subclass plugSet options) via the snapshot.
+  let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
+  let row = snap.items.find((i) => i.instanceId === itemId);
+  if (!row) {
+    snap = await ctx.inventory.refresh(membershipType, membershipId);
+    row = snap.items.find((i) => i.instanceId === itemId);
+  }
+  const socketEntries: any[] = row
+    ? ((await ctx.manifest.getDefinition('DestinyInventoryItemDefinition', row.hash))?.sockets
+        ?.socketEntries ?? [])
+    : [];
+
+  // Pull plugSet definitions referenced by the sockets.
+  const plugSetHashes = new Set<number>();
+  for (const se of socketEntries) {
+    const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
+    if (ps) plugSetHashes.add(ps);
+  }
+  const plugSets = await ctx.manifest.getDefinitions('DestinyPlugSetDefinition', [
+    ...plugSetHashes,
+  ]);
+
+  // Candidate plug hashes per socket = reusable component ∪ plugSet ∪ singleInitial.
+  const candidates = (idx: number): number[] => {
+    const out = new Set<number>();
+    for (const p of reusable[String(idx)] ?? []) {
+      if (p.canInsert !== false) out.add(p.plugItemHash);
+    }
+    const se = socketEntries[idx];
+    if (se) {
+      const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
+      const def = ps ? plugSets[String(ps)] : undefined;
+      // Include all plugSet items — subclass aspects/fragments are unlocks
+      // (currentlyCanRoll=false) so we must not filter on it. Sunset
+      // duplicates that can't actually be inserted are weeded out by the
+      // callers' per-candidate insert retry.
+      for (const pi of def?.reusablePlugItems ?? []) out.add(pi.plugItemHash);
+      if (se.singleInitialItemHash) out.add(se.singleInitialItemHash);
+    }
+    return [...out];
+  };
+
+  const socketCount = Math.max(sockets.length, socketEntries.length);
+  const allHashes = new Set<number>();
+  for (let i = 0; i < socketCount; i++) {
+    if (onlySocket !== undefined && i !== onlySocket) continue;
+    for (const h of candidates(i)) allHashes.add(h);
+  }
+  // Also resolve each socket's CURRENT plug so we can tell empty sockets apart.
+  for (const s of sockets) if (s?.plugHash) allHashes.add(s.plugHash);
+  const defs = await ctx.manifest.getDefinitions('DestinyInventoryItemDefinition', [...allHashes]);
+  const nameOf = (h: number) => (defs[String(h)]?.displayProperties?.name ?? '').toLowerCase();
+  const isEmpty = (i: number) => {
+    const cur = sockets[i]?.plugHash;
+    return !cur || nameOf(cur).includes('empty');
+  };
+
+  return { sockets, energy, socketCount, candidates, defs, nameOf, isEmpty };
+}
+
 export const loadoutTools: ToolDef[] = [
   // -- Name-based, socket-aware, current-version plug insert -----------------
   tool(
@@ -75,72 +155,15 @@ export const loadoutTools: ToolDef[] = [
       const want = (a.plugName as string).trim().toLowerCase();
       const forceIdx = a.socketIndex as number | undefined;
 
-      // Live sockets (current plug) + live reusable plugs (armor mods) + instance energy (300).
-      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310, 300]);
-      const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
-      const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
-      const energy = item.Response?.instance?.data?.energy as
-        | { energyCapacity?: number; energyUsed?: number }
-        | undefined;
-
-      // Resolve the item's definition hash (for subclass plugSet options) via the snapshot.
-      let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
-      let row = snap.items.find((i) => i.instanceId === itemId);
-      if (!row) {
-        snap = await ctx.inventory.refresh(membershipType, membershipId);
-        row = snap.items.find((i) => i.instanceId === itemId);
-      }
-      const socketEntries: any[] = row
-        ? ((await ctx.manifest.getDefinition('DestinyInventoryItemDefinition', row.hash))?.sockets
-            ?.socketEntries ?? [])
-        : [];
-
-      // Pull plugSet definitions referenced by the sockets.
-      const plugSetHashes = new Set<number>();
-      for (const se of socketEntries) {
-        const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
-        if (ps) plugSetHashes.add(ps);
-      }
-      const plugSets = await ctx.manifest.getDefinitions('DestinyPlugSetDefinition', [
-        ...plugSetHashes,
-      ]);
-
-      // Candidate plug hashes per socket = reusable component ∪ plugSet ∪ singleInitial.
-      const candidateHashesForSocket = (idx: number): number[] => {
-        const out = new Set<number>();
-        for (const p of reusable[String(idx)] ?? []) {
-          if (p.canInsert !== false) out.add(p.plugItemHash);
-        }
-        const se = socketEntries[idx];
-        if (se) {
-          const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
-          const def = ps ? plugSets[String(ps)] : undefined;
-          // Include all plugSet items — subclass aspects/fragments are unlocks
-          // (currentlyCanRoll=false) so we must not filter on it. Sunset
-          // duplicates that can't actually be inserted are weeded out by the
-          // per-candidate insert retry below.
-          for (const pi of def?.reusablePlugItems ?? []) out.add(pi.plugItemHash);
-          if (se.singleInitialItemHash) out.add(se.singleInitialItemHash);
-        }
-        return [...out];
-      };
-
-      const socketCount = Math.max(sockets.length, socketEntries.length);
-      const allHashes = new Set<number>();
-      for (let i = 0; i < socketCount; i++) {
-        if (forceIdx !== undefined && i !== forceIdx) continue;
-        for (const h of candidateHashesForSocket(i)) allHashes.add(h);
-      }
-      // Also resolve each socket's CURRENT plug so we can tell empty sockets apart.
-      for (const s of sockets) if (s?.plugHash) allHashes.add(s.plugHash);
-      const defs = await ctx.manifest.getDefinitions('DestinyInventoryItemDefinition', [
-        ...allHashes,
-      ]);
-      const nameOf = (h: number) => (defs[String(h)]?.displayProperties?.name ?? '').toLowerCase();
-      const isEmptySocket = (i: number) => {
-        const cur = sockets[i]?.plugHash;
-        return !cur || nameOf(cur).includes('empty');
-      };
+      const {
+        sockets,
+        energy,
+        socketCount,
+        candidates: candidateHashesForSocket,
+        defs,
+        nameOf,
+        isEmpty: isEmptySocket,
+      } = await loadItemSockets(ctx, membershipType, membershipId, itemId, forceIdx);
 
       const candidates: Array<{ idx: number; hash: number; already: boolean; empty: boolean }> = [];
       for (let i = 0; i < socketCount; i++) {
@@ -229,59 +252,17 @@ export const loadoutTools: ToolDef[] = [
       const itemId = a.itemId as string;
       const names = (a.plugNames as string[]).map((n) => n.trim());
 
-      const item = await ctx.api.getItem(membershipType, membershipId, itemId, [305, 310, 300]);
-      const sockets: any[] = item.Response?.sockets?.data?.sockets ?? [];
-      const reusable: Record<string, any[]> = item.Response?.reusablePlugs?.data?.plugs ?? {};
-      const energy = item.Response?.instance?.data?.energy as
-        | { energyCapacity?: number; energyUsed?: number }
-        | undefined;
+      const {
+        sockets,
+        energy,
+        socketCount,
+        candidates: candHashes,
+        defs,
+        nameOf,
+        isEmpty,
+      } = await loadItemSockets(ctx, membershipType, membershipId, itemId);
       // Running energy tally — each placed mod changes how much is free for the next.
       let energyUsed = energy?.energyUsed ?? 0;
-
-      let snap = await ctx.inventory.getOrBuild(membershipType, membershipId);
-      let row = snap.items.find((i) => i.instanceId === itemId);
-      if (!row) {
-        snap = await ctx.inventory.refresh(membershipType, membershipId);
-        row = snap.items.find((i) => i.instanceId === itemId);
-      }
-      const socketEntries: any[] = row
-        ? ((await ctx.manifest.getDefinition('DestinyInventoryItemDefinition', row.hash))?.sockets
-            ?.socketEntries ?? [])
-        : [];
-      const plugSetHashes = new Set<number>();
-      for (const se of socketEntries) {
-        const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
-        if (ps) plugSetHashes.add(ps);
-      }
-      const plugSets = await ctx.manifest.getDefinitions('DestinyPlugSetDefinition', [
-        ...plugSetHashes,
-      ]);
-      const candHashes = (idx: number): number[] => {
-        const out = new Set<number>();
-        for (const p of reusable[String(idx)] ?? [])
-          if (p.canInsert !== false) out.add(p.plugItemHash);
-        const se = socketEntries[idx];
-        if (se) {
-          const ps = se.reusablePlugSetHash ?? se.randomizedPlugSetHash;
-          for (const pi of (ps ? plugSets[String(ps)] : undefined)?.reusablePlugItems ?? [])
-            out.add(pi.plugItemHash);
-          if (se.singleInitialItemHash) out.add(se.singleInitialItemHash);
-        }
-        return [...out];
-      };
-
-      const socketCount = Math.max(sockets.length, socketEntries.length);
-      const allHashes = new Set<number>();
-      for (let i = 0; i < socketCount; i++) for (const h of candHashes(i)) allHashes.add(h);
-      for (const s of sockets) if (s?.plugHash) allHashes.add(s.plugHash);
-      const defs = await ctx.manifest.getDefinitions('DestinyInventoryItemDefinition', [
-        ...allHashes,
-      ]);
-      const nameOf = (h: number) => (defs[String(h)]?.displayProperties?.name ?? '').toLowerCase();
-      const isEmpty = (i: number) => {
-        const cur = sockets[i]?.plugHash;
-        return !cur || nameOf(cur).includes('empty');
-      };
 
       const used = new Set<number>();
       const results: any[] = [];

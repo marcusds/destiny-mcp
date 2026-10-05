@@ -9,10 +9,10 @@ services:
     environment:
       D2_MCP_DATA_DIR: /data
     ports:
-      # Listens on ALL interfaces by default. NOTE: the WebSocket transport has
-      # no auth and stored OAuth tokens allow account writes, so anyone who can
-      # reach this host+port gets full access — keep it on a trusted/firewalled
-      # network or front it with a proxy. Set D2_MCP_BIND=127.0.0.1 for loopback.
+      # Listens on ALL interfaces by default. Stored OAuth tokens allow account
+      # writes, so set D2_MCP_AUTH_TOKEN in .env to require a bearer token on
+      # /mcp and WebSocket (otherwise anyone who can reach this port gets full
+      # access). Set D2_MCP_BIND=127.0.0.1 to listen on loopback only.
       - "${D2_MCP_BIND:-0.0.0.0}:3737:3000"
     volumes:
       - d2-data:/data # tokens.json + SQLite manifest cache (~350MB)

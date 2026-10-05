@@ -1,7 +1,7 @@
 {
   "name": "d2-mcp",
   "version": "2.0.0",
-  "description": "Comprehensive MCP server for the Bungie.net Destiny 2 API — read + authenticated write actions, clan management, and a local manifest cache",
+  "description": "Comprehensive MCP server for the Bungie.net Destiny 2 API \u2014 read + authenticated write actions, clan management, and a local manifest cache",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -21,10 +21,11 @@
     "dev:auth": "tsx src/index.ts auth",
     "dev:http": "tsx src/index.ts http",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src",
-    "lint:fix": "eslint src --fix",
-    "format": "prettier --write \"src/**/*.ts\" \"*.md\"",
-    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "eslint src test",
+    "lint:fix": "eslint src test --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.md\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "prepare": "husky"
   },
   "lint-staged": {

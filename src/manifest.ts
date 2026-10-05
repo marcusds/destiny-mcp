@@ -19,7 +19,7 @@ const pacificWeekday = new Intl.DateTimeFormat('en-US', {
  * game patches, which land on Tuesdays (Pacific), so check every 3h on
  * Tuesday and daily otherwise. Lookup misses trigger an earlier check.
  */
-function versionCheckMs(now = new Date()): number {
+export function versionCheckMs(now = new Date()): number {
   return (pacificWeekday.format(now) === 'Tue' ? 3 : 24) * 60 * 60_000;
 }
 /** Minimum gap between miss-triggered version checks (hash 0 etc. miss legitimately). */

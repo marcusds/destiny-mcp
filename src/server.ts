@@ -17,6 +17,7 @@ import { InventoryCache } from './inventory.js';
 import { WebSocketServerTransport } from './websocket-transport.js';
 import { loadConfig } from './config.js';
 import { allTools, toolMap, ToolContext } from './tools/index.js';
+import { VERSION } from './version.js';
 
 export function buildContext(): ToolContext {
   const config = loadConfig();
@@ -29,7 +30,7 @@ export function buildContext(): ToolContext {
 
 export function createMCPServer(ctx: ToolContext = buildContext()) {
   const server = new Server(
-    { name: 'destiny2', version: '2.0.0' },
+    { name: 'destiny2', version: VERSION },
     { capabilities: { tools: {} } }
   );
 
@@ -76,10 +77,16 @@ export async function runStdioServer() {
  *
  * If D2_MCP_AUTH_TOKEN is set, both transports require `Authorization: Bearer <token>`.
  */
-export async function runHttpServer(port = 3000) {
-  const ctx = buildContext();
-  ctx.inventory.startAutoRefresh();
+export async function runHttpServer(
+  port = 3000,
+  opts: { ctx?: ToolContext; sessionIdleMs?: number; sweepMs?: number } = {}
+) {
+  const ctx = opts.ctx ?? buildContext();
+  if (!opts.ctx) ctx.inventory.startAutoRefresh();
   const authToken = process.env.D2_MCP_AUTH_TOKEN || undefined;
+  const sessionIdleMs =
+    opts.sessionIdleMs ??
+    Math.max(1, Number(process.env.D2_MCP_SESSION_IDLE_MINUTES) || 30) * 60_000;
   const allowedOrigins = new Set(
     (process.env.D2_MCP_ALLOWED_ORIGINS ?? '')
       .split(',')
@@ -87,8 +94,33 @@ export async function runHttpServer(port = 3000) {
       .filter(Boolean)
   );
 
-  // Streamable HTTP keeps one transport per initialized session.
-  const sessions: Record<string, StreamableHTTPServerTransport> = {};
+  // Streamable HTTP keeps one transport (+ Server) per initialized session.
+  // Clients that vanish without DELETE would leak these, so sessions with no
+  // open stream and no requests for `sessionIdleMs` are closed by a sweep.
+  type Session = { transport: StreamableHTTPServerTransport; lastSeen: number; streams: number };
+  const sessions = new Map<string, Session>();
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const s of sessions.values()) {
+      if (s.streams === 0 && now - s.lastSeen > sessionIdleMs) void s.transport.close();
+    }
+  }, opts.sweepMs ?? 60_000);
+  sweep.unref();
+
+  /** Look up a session by header and mark it active for this request. */
+  function touch(req: IncomingMessage, res: ServerResponse): Session | undefined {
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const session = sessionId ? sessions.get(sessionId) : undefined;
+    if (session) {
+      session.lastSeen = Date.now();
+      session.streams++;
+      res.on('close', () => {
+        session.streams--;
+        session.lastSeen = Date.now();
+      });
+    }
+    return session;
+  }
 
   const httpServer = createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
@@ -98,7 +130,7 @@ export async function runHttpServer(port = 3000) {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(
         JSON.stringify({
           name: 'destiny2',
-          version: '2.0.0',
+          version: VERSION,
           tools: allTools.length,
           transports: { streamableHttp: '/mcp', webSocket: `ws://<host>:${port}` },
           authRequired: Boolean(authToken),
@@ -119,29 +151,29 @@ export async function runHttpServer(port = 3000) {
       if (req.method === 'POST') {
         const body = await readJson(req);
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
-        let transport = sessionId ? sessions[sessionId] : undefined;
+        let transport = touch(req, res)?.transport;
 
         if (!transport && isInitializeRequest(body)) {
-          transport = new StreamableHTTPServerTransport({
+          const created = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid) => {
-              sessions[sid] = transport!;
+              sessions.set(sid, { transport: created, lastSeen: Date.now(), streams: 0 });
             },
           });
-          transport.onclose = () => {
-            if (transport!.sessionId) delete sessions[transport!.sessionId];
+          created.onclose = () => {
+            if (created.sessionId) sessions.delete(created.sessionId);
           };
-          await createMCPServer(ctx).connect(transport);
+          await createMCPServer(ctx).connect(created);
+          transport = created;
         } else if (!transport) {
-          return sendJsonError(res, 400, -32000, 'No valid session ID for non-initialize request');
+          return sessionNotFound(res, sessionId);
         }
 
         await transport.handleRequest(req, res, body);
       } else if (req.method === 'GET' || req.method === 'DELETE') {
         // GET opens the SSE notification stream; DELETE terminates the session.
-        const sessionId = req.headers['mcp-session-id'] as string | undefined;
-        const transport = sessionId ? sessions[sessionId] : undefined;
-        if (!transport) return sendJsonError(res, 400, -32000, 'Invalid or missing session ID');
+        const transport = touch(req, res)?.transport;
+        if (!transport) return sessionNotFound(res, req.headers['mcp-session-id']);
         await transport.handleRequest(req, res);
       } else {
         res.writeHead(405).end('Method not allowed');
@@ -181,7 +213,8 @@ export async function runHttpServer(port = 3000) {
     );
   });
 
-  return { httpServer, wss };
+  httpServer.on('close', () => clearInterval(sweep));
+  return { httpServer, wss, sessions };
 }
 
 /** Backwards-compatible alias — the server now serves both /mcp and WebSocket. */
@@ -226,6 +259,12 @@ function readJson(req: IncomingMessage): Promise<unknown> {
     });
     req.on('error', reject);
   });
+}
+
+/** 404 for an unknown/expired session tells spec-compliant clients to re-initialize. */
+function sessionNotFound(res: ServerResponse, sessionId: string | string[] | undefined) {
+  if (sessionId) return sendJsonError(res, 404, -32001, 'Session not found');
+  return sendJsonError(res, 400, -32000, 'Missing session ID');
 }
 
 function sendJsonError(res: ServerResponse, status: number, code: number, message: string) {
