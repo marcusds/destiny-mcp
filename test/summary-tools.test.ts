@@ -231,3 +231,21 @@ test('get_checklist lists missing entries, merging character-scoped progress', a
     ['Cat Statues', 'Kepler Urns']
   );
 });
+
+test('get_checklist shows the same read the tracker used for your own account', async () => {
+  const checklist = {
+    hash: 77,
+    displayProperties: { name: 'Kepler Urns' },
+    entries: [{ hash: 1, displayProperties: { name: 'Kepler Urn #1' } }],
+  };
+  const read = (found: boolean) => ({
+    Response: { profileProgression: { data: { checklists: { 77: { 1: found } } } } },
+  });
+  const ctx: any = {
+    inventory: { resolvePrimary: async () => primary },
+    manifest: { getAll: async () => [checklist] },
+    checklists: { observe: async () => read(false), locationOf: () => undefined },
+    api: { getProfile: async () => read(true) }, // a second, newer read would disagree
+  };
+  assert.equal((await run('get_checklist', ctx, { name: 'urns' })).found, 0);
+});

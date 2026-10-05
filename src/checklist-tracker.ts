@@ -49,7 +49,7 @@ export class ChecklistTracker {
   private readonly file: string;
   private state: TrackerState = { found: {}, areas: {}, locations: {} };
   private timer?: NodeJS.Timeout;
-  private observing: Promise<void> | null = null;
+  private observing: Promise<any> | null = null;
 
   constructor(
     private api: DestinyAPI,
@@ -101,17 +101,21 @@ export class ChecklistTracker {
     }
   }
 
-  /** Read checklists + triumph counters once and attribute new finds. Single-flight. */
-  observe(): Promise<void> {
+  /**
+   * Read checklists + triumph counters once and attribute new finds. Single-flight.
+   * Resolves to the profile response it used (components 104 + 900), so callers can
+   * show exactly the data the tracker saw (separate reads can disagree mid-update).
+   */
+  observe(): Promise<any> {
     this.observing ??= this.doObserve().finally(() => {
       this.observing = null;
     });
     return this.observing;
   }
 
-  private async doObserve(): Promise<void> {
+  private async doObserve(): Promise<any> {
     const p = await this.inventory.resolvePrimary();
-    if (!p) return;
+    if (!p) return undefined;
     const [profile, checklists, records] = await Promise.all([
       this.api.getProfile(p.membershipType, p.membershipId, [104, 900]),
       this.manifest.getAll('DestinyChecklistDefinition'),
@@ -156,6 +160,7 @@ export class ChecklistTracker {
       this.state.areas[key] = areas;
     }
     this.save();
+    return profile;
   }
 
   /** area name -> current progress, from the tracked triumphs' objectives. */

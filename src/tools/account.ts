@@ -236,9 +236,14 @@ export const accountTools: ToolDef[] = [
       const checklist = all.find((c) => name(c) === q) ?? all.find((c) => name(c).includes(q));
       if (!checklist) throw new Error(`No checklist matching "${a.name}".`);
 
-      // Record any new finds for location learning (best-effort, own account only).
-      await ctx.checklists?.observe().catch(() => undefined);
-      const profile = await ctx.api.getProfile(membershipType, membershipId, [104]);
+      // For your own account, read once through the tracker (which also records
+      // any new finds) so the answer matches what was logged; otherwise read directly.
+      const primary = await ctx.inventory.resolvePrimary().catch(() => undefined);
+      const own =
+        primary?.membershipType === membershipType && primary?.membershipId === membershipId;
+      const profile =
+        (own && (await ctx.checklists?.observe().catch(() => undefined))) ||
+        (await ctx.api.getProfile(membershipType, membershipId, [104]));
       const R = profile.Response ?? {};
       const key = String(checklist.hash);
       // Profile-scoped checklists live on profileProgression; character-scoped
