@@ -1,4 +1,5 @@
 import { ToolDef, tool, str } from './registry.js';
+import { extractCode } from '../auth.js';
 
 /**
  * OAuth helper tools. Because an MCP server runs non-interactively, the full
@@ -41,12 +42,8 @@ export const authTools: ToolDef[] = [
       required: ['codeOrUrl'],
     },
     async (ctx, a) => {
-      const raw = (a.codeOrUrl as string).trim();
-      let code = raw;
-      const idx = raw.indexOf('code=');
-      if (idx >= 0) {
-        code = raw.slice(idx + 5).split('&')[0];
-      }
+      const code = extractCode((a.codeOrUrl as string).trim());
+      if (!code) throw new Error('Could not parse an authorization code from the input.');
       const tokens = await ctx.auth.exchangeCodeForToken(code);
       return { authenticated: true, membershipId: tokens.membershipId };
     }

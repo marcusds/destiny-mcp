@@ -7,7 +7,7 @@ import {
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { IncomingMessage, ServerResponse, createServer } from 'http';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { WebSocketServer } from 'ws';
 
 import { DestinyAPI } from './destiny-api.js';
@@ -80,6 +80,12 @@ export async function runHttpServer(port = 3000) {
   const ctx = buildContext();
   ctx.inventory.startAutoRefresh();
   const authToken = process.env.D2_MCP_AUTH_TOKEN || undefined;
+  const allowedOrigins = new Set(
+    (process.env.D2_MCP_ALLOWED_ORIGINS ?? '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean)
+  );
 
   // Streamable HTTP keeps one transport per initialized session.
   const sessions: Record<string, StreamableHTTPServerTransport> = {};
@@ -104,6 +110,9 @@ export async function runHttpServer(port = 3000) {
   });
 
   async function handleMcp(req: IncomingMessage, res: ServerResponse) {
+    if (!originAllowed(req, allowedOrigins)) {
+      return sendJsonError(res, 403, -32001, 'Forbidden origin');
+    }
     if (!authorized(req, authToken)) return sendJsonError(res, 401, -32001, 'Unauthorized');
 
     try {
@@ -147,6 +156,11 @@ export async function runHttpServer(port = 3000) {
   // WebSocket transport on the same port.
   const wss = new WebSocketServer({ noServer: true });
   httpServer.on('upgrade', (req, socket, head) => {
+    if (!originAllowed(req, allowedOrigins)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if (!authorized(req, authToken)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -177,7 +191,20 @@ export const runWebSocketServer = runHttpServer;
 
 function authorized(req: IncomingMessage, token: string | undefined): boolean {
   if (!token) return true;
-  return req.headers['authorization'] === `Bearer ${token}`;
+  // Compare fixed-length digests in constant time.
+  const digest = (v: string) => createHash('sha256').update(v).digest();
+  return timingSafeEqual(digest(req.headers['authorization'] ?? ''), digest(`Bearer ${token}`));
+}
+
+/**
+ * Block browser-originated requests. MCP clients don't send `Origin`; browsers
+ * always do on WebSocket upgrades and cross-site fetches. Without this, any web
+ * page the user visits could drive the server (cross-site WebSocket hijacking /
+ * DNS rebinding). Trusted browser clients can be listed in D2_MCP_ALLOWED_ORIGINS.
+ */
+function originAllowed(req: IncomingMessage, allowed: Set<string>): boolean {
+  const origin = req.headers['origin'];
+  return origin === undefined || allowed.has(origin);
 }
 
 function readJson(req: IncomingMessage): Promise<unknown> {

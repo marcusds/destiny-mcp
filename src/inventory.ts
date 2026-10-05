@@ -77,6 +77,8 @@ export class InventoryCache {
   private intervalMs: number;
   private timer?: NodeJS.Timeout;
   private primary?: { membershipType: number; membershipId: string };
+  /** Bungie.net account `primary` was resolved for (re-resolve if it changes). */
+  private primaryFor?: string | null;
 
   constructor(
     private api: DestinyAPI,
@@ -101,17 +103,22 @@ export class InventoryCache {
   // -- Persistence --------------------------------------------------------
 
   private loadFromDisk(): void {
+    let files: string[];
     try {
-      if (!fs.existsSync(this.dir)) return;
-      for (const file of fs.readdirSync(this.dir)) {
-        if (!file.endsWith('.json')) continue;
+      files = fs.existsSync(this.dir) ? fs.readdirSync(this.dir) : [];
+    } catch {
+      return;
+    }
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      try {
         const parsed = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8'));
         const k = this.key(parsed.membershipType, parsed.membershipId);
         if (file.startsWith('armor-')) this.armorSnapshots.set(k, parsed as ArmorSnapshot);
         else this.snapshots.set(k, parsed as InventorySnapshot);
+      } catch {
+        /* skip a corrupt file; the next refresh rewrites it */
       }
-    } catch {
-      /* ignore corrupt cache */
     }
   }
 
@@ -325,13 +332,16 @@ export class InventoryCache {
 
   /** Resolve (and cache) the authenticated account's primary Destiny membership. */
   async resolvePrimary(): Promise<{ membershipType: number; membershipId: string } | undefined> {
-    if (this.primary) return this.primary;
+    const account = this.auth.getMembershipId();
+    if (this.primary && this.primaryFor === account) return this.primary;
+    this.primary = undefined;
     const data = await this.api.getMembershipsForCurrentUser();
     const memberships = data.Response?.destinyMemberships ?? [];
     if (memberships.length === 0) return undefined;
     const primaryId = data.Response?.primaryMembershipId;
     const pick = memberships.find((m: any) => m.membershipId === primaryId) ?? memberships[0];
     this.primary = { membershipType: pick.membershipType, membershipId: pick.membershipId };
+    this.primaryFor = account;
     return this.primary;
   }
 

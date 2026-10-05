@@ -24,7 +24,11 @@ const EXPIRY_SKEW_MS = 60_000;
 export class BungieAuth {
   private config: BungieConfig;
   private tokens: StoredTokens | null = null;
+  /** In-flight refresh shared by concurrent callers (refresh tokens rotate). */
+  private refreshing: Promise<StoredTokens> | null = null;
   private readonly tokenPath: string;
+  /** mtime of tokens.json when last read/written, to spot logins by other processes. */
+  private tokenMtimeMs = 0;
 
   constructor(config: BungieConfig) {
     this.config = config;
@@ -37,6 +41,7 @@ export class BungieAuth {
   private loadTokens(): void {
     try {
       if (fs.existsSync(this.tokenPath)) {
+        this.tokenMtimeMs = fs.statSync(this.tokenPath).mtimeMs;
         this.tokens = JSON.parse(fs.readFileSync(this.tokenPath, 'utf-8'));
       }
     } catch {
@@ -49,6 +54,7 @@ export class BungieAuth {
     fs.writeFileSync(this.tokenPath, JSON.stringify(this.tokens, null, 2), {
       mode: 0o600,
     });
+    this.tokenMtimeMs = fs.statSync(this.tokenPath).mtimeMs;
   }
 
   private store(raw: OAuthTokenResponse): StoredTokens {
@@ -67,10 +73,20 @@ export class BungieAuth {
 
   // -- State -------------------------------------------------------------
 
-  /** Re-read tokens from disk if we don't have them in memory yet. Lets a
-   * long-running process pick up a login performed by a separate `auth` run. */
+  /** Re-read tokens from disk if missing in memory or the file changed. Lets a
+   * long-running process pick up a login (or logout) by a separate `auth` run. */
   private ensureLoaded(): void {
-    if (!this.tokens) this.loadTokens();
+    let mtimeMs: number | null;
+    try {
+      mtimeMs = fs.statSync(this.tokenPath).mtimeMs;
+    } catch {
+      mtimeMs = null;
+    }
+    if (mtimeMs === null) {
+      if (this.tokens && this.tokenMtimeMs) this.tokens = null; // logged out elsewhere
+      return;
+    }
+    if (!this.tokens || mtimeMs !== this.tokenMtimeMs) this.loadTokens();
   }
 
   isAuthenticated(): boolean {
@@ -133,7 +149,19 @@ export class BungieAuth {
     }
   }
 
-  private async refresh(): Promise<StoredTokens> {
+  /**
+   * Refresh the access token. Bungie rotates the refresh token on every use, so
+   * concurrent callers must share ONE request — a second refresh with the
+   * already-spent token would fail (or overwrite newer tokens).
+   */
+  private refresh(): Promise<StoredTokens> {
+    this.refreshing ??= this.doRefresh().finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  private async doRefresh(): Promise<StoredTokens> {
     if (this.refreshTokenExpired()) {
       throw new Error('Refresh token missing or expired — re-run `d2-mcp auth`.');
     }
@@ -254,7 +282,7 @@ export class BungieAuth {
             res.writeHead(400).end('Missing ?code');
             return;
           }
-          if (state && state !== expectedState) {
+          if (state !== expectedState) {
             res.writeHead(400).end('State mismatch — possible CSRF. Aborting.');
             finish(() => reject(new Error('OAuth state mismatch.')));
             return;
@@ -273,13 +301,20 @@ export class BungieAuth {
         // Port busy / unusable — fall back to manual paste only.
         console.error(`(local callback listener unavailable: ${e.message})`);
       });
-      server.listen(port, () => {
+      // Loopback only — the callback carries a live authorization code.
+      server.listen(port, '127.0.0.1', () => {
         console.error(`Listening for the OAuth callback on port ${port}...`);
       });
 
       const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
       rl.question('Paste redirect URL or code (or wait for the browser): ', (answer) => {
-        const code = extractCode(answer.trim());
+        const input = answer.trim();
+        const state = extractState(input);
+        if (state !== null && state !== expectedState) {
+          finish(() => reject(new Error('OAuth state mismatch.')));
+          return;
+        }
+        const code = extractCode(input);
         if (code) finish(() => resolve(code));
         else finish(() => reject(new Error('Could not parse an authorization code.')));
       });
@@ -288,6 +323,7 @@ export class BungieAuth {
 
   logout(): void {
     this.tokens = null;
+    this.tokenMtimeMs = 0;
     try {
       if (fs.existsSync(this.tokenPath)) fs.unlinkSync(this.tokenPath);
     } catch {
@@ -296,8 +332,18 @@ export class BungieAuth {
   }
 }
 
+/** The `state` param of a pasted redirect URL, or null for a bare code. */
+function extractState(input: string): string | null {
+  if (!input.includes('://')) return null;
+  try {
+    return new URL(input).searchParams.get('state') ?? '';
+  } catch {
+    return null;
+  }
+}
+
 /** Pull an authorization code out of a pasted full redirect URL or bare code. */
-function extractCode(input: string): string | null {
+export function extractCode(input: string): string | null {
   if (!input) return null;
   if (input.includes('code=')) {
     try {
