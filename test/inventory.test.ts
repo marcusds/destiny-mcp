@@ -32,6 +32,7 @@ const defs: Record<string, any> = {
     displayProperties: { name: 'Hood' },
     itemTypeDisplayName: 'Helmet',
     inventory: { tierTypeName: 'Legendary', bucketTypeHash: HELMET_BUCKET },
+    classType: 1,
   },
 };
 
@@ -86,6 +87,8 @@ test('refreshBoth builds inventory and armor from one profile fetch', async () =
   assert.equal(armor.armor.length, 1);
   assert.deepEqual(armor.armor[0].stats, { Weapons: 30 });
   assert.equal(armor.armor[0].tier, 5);
+  // Class comes from the definition (Hunter), not the character holding it (Warlock).
+  assert.equal(armor.armor[0].class, 'Hunter');
 });
 
 test('a corrupt cache file is skipped without dropping the others', async () => {
@@ -108,4 +111,14 @@ test('re-resolves the primary membership when the logged-in account changes', as
   assert.equal((await cache.resolvePrimary())?.membershipId, 'd-bnet1');
   account = 'bnet2';
   assert.equal((await cache.resolvePrimary())?.membershipId, 'd-bnet2');
+});
+
+test('armor snapshots from an older schema are ignored on load', async () => {
+  const { cache, dataDir } = setup();
+  await cache.refreshBoth(3, 'm1');
+  const file = path.join(dataDir, 'inventory', 'armor-3-m1.json');
+  const old = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  delete old.schema;
+  fs.writeFileSync(file, JSON.stringify(old));
+  assert.equal(setup(dataDir).cache.getArmorSnapshot(3, 'm1'), undefined);
 });

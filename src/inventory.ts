@@ -29,6 +29,8 @@ export interface InventorySnapshot {
 export interface ArmorRow {
   name: string;
   slot: string;
+  /** Class the armor is for: Titan | Hunter | Warlock (from the definition, not the holder). */
+  class: string;
   /** Armor 3.0 tier (1-5), or null if unknown. */
   tier: number | null;
   energy: number | null;
@@ -41,7 +43,11 @@ export interface ArmorRow {
   hash: number;
 }
 
+/** Bump when ArmorRow changes shape so stale on-disk snapshots are rebuilt. */
+const ARMOR_SCHEMA = 2;
+
 export interface ArmorSnapshot {
+  schema?: number;
   membershipType: number;
   membershipId: string;
   fetchedAt: number;
@@ -114,8 +120,9 @@ export class InventoryCache {
       try {
         const parsed = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8'));
         const k = this.key(parsed.membershipType, parsed.membershipId);
-        if (file.startsWith('armor-')) this.armorSnapshots.set(k, parsed as ArmorSnapshot);
-        else this.snapshots.set(k, parsed as InventorySnapshot);
+        if (file.startsWith('armor-')) {
+          if (parsed.schema === ARMOR_SCHEMA) this.armorSnapshots.set(k, parsed as ArmorSnapshot);
+        } else this.snapshots.set(k, parsed as InventorySnapshot);
       } catch {
         /* skip a corrupt file; the next refresh rewrites it */
       }
@@ -311,6 +318,7 @@ export class InventoryCache {
         return {
           name: def?.displayProperties?.name ?? '',
           slot,
+          class: CLASSES[def?.classType] ?? 'Unknown',
           tier: inst.gearTier ?? null,
           energy: inst.energy?.energyCapacity ?? null,
           character: r.character,
@@ -324,7 +332,13 @@ export class InventoryCache {
       .filter((r): r is ArmorRow => r !== null);
     armor.sort((a, b) => (b.tier ?? 0) - (a.tier ?? 0) || a.name.localeCompare(b.name));
 
-    const snap: ArmorSnapshot = { membershipType, membershipId, fetchedAt: Date.now(), armor };
+    const snap: ArmorSnapshot = {
+      schema: ARMOR_SCHEMA,
+      membershipType,
+      membershipId,
+      fetchedAt: Date.now(),
+      armor,
+    };
     this.armorSnapshots.set(this.key(membershipType, membershipId), snap);
     this.saveArmorToDisk(snap);
     return snap;

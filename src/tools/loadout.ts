@@ -346,12 +346,13 @@ export const loadoutTools: ToolDef[] = [
   // -- Armor with stats + tier + energy in one call --------------------------
   tool(
     'get_armor',
-    'List owned armor with resolved Armor 3.0 stats (Weapons/Health/Class/Grenade/Super/Melee), gearTier (1-5), and energy. Reads a cached snapshot (refreshed hourly) unless refresh=true. Includes vault. Omit membership to use your authenticated account.',
+    'List owned armor (with the class each piece is for) and resolved Armor 3.0 stats (Weapons/Health/Class/Grenade/Super/Melee), gearTier (1-5), and energy. Reads a cached snapshot (refreshed hourly) unless refresh=true. Includes vault. Omit membership to use your authenticated account.',
     {
       properties: {
         membershipType: fields.membershipType(),
         membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
         slot: str('Filter by slot: helmet | gauntlets | chest | legs | class'),
+        class: str('Filter by the class the armor is for: Titan | Hunter | Warlock'),
         nameContains: str('Filter by item name substring (e.g. a set name)'),
         minTier: num('Only return armor at or above this gearTier (1-5)'),
         refresh: bool('Force a live pull instead of using the cached snapshot'),
@@ -373,7 +374,9 @@ export const loadoutTools: ToolDef[] = [
       const slot = (a.slot as string | undefined)?.toLowerCase();
       const nameSub = (a.nameContains as string | undefined)?.toLowerCase();
       const minTier = a.minTier as number | undefined;
+      const cls = (a.class as string | undefined)?.toLowerCase();
       if (slot) rows = rows.filter((r) => r.slot === slot);
+      if (cls) rows = rows.filter((r) => r.class.toLowerCase() === cls);
       if (nameSub) rows = rows.filter((r) => r.name.toLowerCase().includes(nameSub));
       if (minTier !== undefined) rows = rows.filter((r) => (r.tier ?? 0) >= minTier);
 

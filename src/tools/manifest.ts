@@ -1,4 +1,22 @@
-import { ToolDef, tool, num, str, numArr } from './registry.js';
+import { ToolDef, tool, num, str, bool, numArr } from './registry.js';
+
+const CLASSES: Record<number, string> = { 0: 'Titan', 1: 'Hunter', 2: 'Warlock' };
+
+/** Compact, table-agnostic view of a definition; item-only fields are omitted when absent. */
+function summarize(def: any): Record<string, unknown> {
+  const description: string = def.displayProperties?.description ?? '';
+  const out: Record<string, unknown> = {
+    hash: def.hash,
+    name: def.displayProperties?.name,
+    type: def.itemTypeDisplayName || undefined,
+    tier: def.inventory?.tierTypeName || undefined,
+    class: CLASSES[def.classType],
+    description:
+      description.length > 160 ? `${description.slice(0, 157)}...` : description || undefined,
+  };
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return out;
+}
 
 /** Manifest tools: pointer, local hash resolution, and name search via cache. */
 export const manifestTools: ToolDef[] = [
@@ -51,21 +69,24 @@ export const manifestTools: ToolDef[] = [
 
   tool(
     'manifest_search',
-    'Search the cached manifest for definitions whose name matches a query (e.g. find a weapon by name)',
+    'Search the cached manifest for definitions whose name matches a query (e.g. find a weapon by name). Returns compact summaries (hash, name, type, tier, class); pass full=true for raw definitions, or use manifest_lookup on a hash.',
     {
       properties: {
         table: str('Definition table to search (default DestinyInventoryItemDefinition)'),
         query: str('Name substring to search for'),
         limit: num('Max results (default 25)'),
+        full: bool('Return full raw definitions instead of summaries (large)'),
       },
       required: ['query'],
     },
-    (ctx, a) =>
-      ctx.manifest.searchByName(
+    async (ctx, a) => {
+      const defs = await ctx.manifest.searchByName(
         (a.table as string) ?? 'DestinyInventoryItemDefinition',
         a.query as string,
         (a.limit as number) ?? 25
-      )
+      );
+      return a.full === true ? defs : defs.map(summarize);
+    }
   ),
 
   tool(
