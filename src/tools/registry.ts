@@ -3,6 +3,7 @@ import { DestinyAPI } from '../destiny-api.js';
 import { BungieAuth } from '../auth.js';
 import { ManifestManager } from '../manifest.js';
 import { InventoryCache } from '../inventory.js';
+import { ChecklistTracker } from '../checklist-tracker.js';
 
 /** Shared services handed to every tool handler. */
 export interface ToolContext {
@@ -10,6 +11,7 @@ export interface ToolContext {
   auth: BungieAuth;
   manifest: ManifestManager;
   inventory: InventoryCache;
+  checklists: ChecklistTracker;
 }
 
 export type ToolArgs = Record<string, unknown>;

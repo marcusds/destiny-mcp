@@ -14,6 +14,7 @@ import { DestinyAPI } from './destiny-api.js';
 import { BungieAuth } from './auth.js';
 import { ManifestManager } from './manifest.js';
 import { InventoryCache } from './inventory.js';
+import { ChecklistTracker } from './checklist-tracker.js';
 import { WebSocketServerTransport } from './websocket-transport.js';
 import { loadConfig } from './config.js';
 import { allTools, toolMap, ToolContext } from './tools/index.js';
@@ -25,7 +26,8 @@ export function buildContext(): ToolContext {
   const api = new DestinyAPI(config, auth);
   const manifest = new ManifestManager(api, config);
   const inventory = new InventoryCache(api, manifest, auth, config);
-  return { api, auth, manifest, inventory };
+  const checklists = new ChecklistTracker(api, manifest, auth, inventory, config);
+  return { api, auth, manifest, inventory, checklists };
 }
 
 export function createMCPServer(ctx: ToolContext = buildContext()) {
@@ -63,6 +65,7 @@ function errorResult(message: string) {
 export async function runStdioServer() {
   const ctx = buildContext();
   ctx.inventory.startAutoRefresh();
+  ctx.checklists.start();
   const server = createMCPServer(ctx);
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -82,7 +85,10 @@ export async function runHttpServer(
   opts: { ctx?: ToolContext; sessionIdleMs?: number; sweepMs?: number } = {}
 ) {
   const ctx = opts.ctx ?? buildContext();
-  if (!opts.ctx) ctx.inventory.startAutoRefresh();
+  if (!opts.ctx) {
+    ctx.inventory.startAutoRefresh();
+    ctx.checklists.start();
+  }
   const authToken = process.env.D2_MCP_AUTH_TOKEN || undefined;
   const sessionIdleMs =
     opts.sessionIdleMs ??

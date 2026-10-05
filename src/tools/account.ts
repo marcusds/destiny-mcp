@@ -210,7 +210,7 @@ export const accountTools: ToolDef[] = [
 
   tool(
     'get_checklist',
-    'Which individual collectibles you have found in a checklist (e.g. "Kepler Urns", "Kepler Ability Chests", "Feathers of Light", "Lost Sectors", "Region Chests"). Returns found/total and the missing entries by name/number. Omit name to list available checklists. Omit membership to use your authenticated account.',
+    'Which individual collectibles you have found in a checklist (e.g. "Kepler Urns", "Kepler Ability Chests", "Feathers of Light", "Lost Sectors", "Region Chests"). Returns found/total, the missing entries by name/number, and (for Kepler urns/chests) the area where entries were found, learned automatically as you collect them. Omit name to list available checklists. Omit membership to use your authenticated account.',
     {
       properties: {
         name: str('Checklist name or part of it (omit to list all checklists)'),
@@ -236,6 +236,8 @@ export const accountTools: ToolDef[] = [
       const checklist = all.find((c) => name(c) === q) ?? all.find((c) => name(c).includes(q));
       if (!checklist) throw new Error(`No checklist matching "${a.name}".`);
 
+      // Record any new finds for location learning (best-effort, own account only).
+      await ctx.checklists?.observe().catch(() => undefined);
       const profile = await ctx.api.getProfile(membershipType, membershipId, [104]);
       const R = profile.Response ?? {};
       const key = String(checklist.hash);
@@ -249,11 +251,20 @@ export const accountTools: ToolDef[] = [
       const missing = entries
         .filter((e) => !states.some((s) => s[String(e.hash)]))
         .map((e) => e.displayProperties?.name ?? String(e.hash));
+      const learned = entries
+        .map((e) => ctx.checklists?.locationOf(e.hash))
+        .filter((l): l is NonNullable<typeof l> => Boolean(l))
+        .map((l) => ({
+          entry: l.entry,
+          ...(l.area ? { area: l.area } : { possibleAreas: l.candidates }),
+          foundAt: l.foundAt,
+        }));
       return {
         checklist: checklist.displayProperties?.name,
         found: entries.length - missing.length,
         total: entries.length,
         missing,
+        ...(learned.length && { foundLocations: learned }),
       };
     }
   ),
