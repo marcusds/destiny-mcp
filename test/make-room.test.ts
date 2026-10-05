@@ -22,6 +22,7 @@ function setup() {
   const moves: string[] = [];
   const ctx: any = {
     inventory: {
+      get: () => ({ items: [{ instanceId: 'h7', location: 'equipped' }] }),
       resolvePrimary: async () => ({ membershipType: 3, membershipId: 'm' }),
       noteTransfer: (_mt: number, id: string) => moves.push(`noted:${id}`),
     },
@@ -54,7 +55,10 @@ function setup() {
             String(h),
             table === 'DestinyInventoryBucketDefinition'
               ? { itemCount: Number(h) === 138197802 ? 700 : 10 }
-              : { displayProperties: { name: `Helmet ${h}` } },
+              : {
+                  displayProperties: { name: `Helmet ${h}` },
+                  inventory: { tierType: Number(h) === 105 ? 6 : 5 },
+                },
           ])
         ),
     },
@@ -71,8 +75,9 @@ test('make_room previews the worst items, skipping loadout items and roomy bucke
   assert.equal(out.preview, true);
   assert.equal(out.plan.length, 1, 'kinetic bucket has room, only helmets listed');
   const ids = out.plan[0].move.map((c: any) => c.instanceId);
-  // tiers: h1=3 (in loadout, skipped), h2=2 h3=3 h4=4 h5=5 h6=1 h7=2 h8=3 h9=4
-  assert.deepEqual(ids, ['h6', 'h2', 'h7']);
+  // tiers: h1=3 (in loadout), h2=2 h3=3 h4=4 h5=5 h6=1 (exotic: ranked last)
+  // h7=2 (just equipped per cache, skipped) h8=3 h9=4
+  assert.deepEqual(ids, ['h2', 'h3', 'h8']);
   assert.equal(out.vaultFree, 699);
   assert.deepEqual(moves, [], 'preview moves nothing');
 });
@@ -81,5 +86,5 @@ test('make_room apply=true moves and records them', async () => {
   const { ctx, moves } = setup();
   const out = await run(ctx, { apply: true, freeSlots: 1 });
   assert.equal(out.moved.length, 1);
-  assert.deepEqual(moves, ['vault:h6', 'noted:h6']);
+  assert.deepEqual(moves, ['vault:h2', 'noted:h2']);
 });

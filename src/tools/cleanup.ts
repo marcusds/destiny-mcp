@@ -65,8 +65,13 @@ export const cleanupTools: ToolDef[] = [
       const instances: Record<string, any> = R.itemComponents?.instances?.data ?? {};
       const stats: Record<string, any> = R.itemComponents?.stats?.data ?? {};
 
-      // Anything referenced by any of this character's loadouts stays put.
-      const inLoadout = new Set<string>();
+      // Anything referenced by any of this character's loadouts stays put, and so
+      // does anything our cache knows we just equipped (Bungie's reads can lag).
+      const inLoadout = new Set<string>(
+        (ctx.inventory.get(membershipType, membershipId)?.items ?? [])
+          .filter((r) => r.location === 'equipped' && r.instanceId)
+          .map((r) => r.instanceId!)
+      );
       for (const l of R.characterLoadouts?.data?.[characterId]?.loadouts ?? []) {
         for (const it of l.items ?? []) inLoadout.add(it.itemInstanceId);
       }
@@ -105,8 +110,10 @@ export const cleanupTools: ToolDef[] = [
           .filter((it) => it.itemInstanceId && !inLoadout.has(it.itemInstanceId))
           .map((it) => {
             const inst = instances[it.itemInstanceId] ?? {};
-            const tier: number = inst.gearTier ?? 0;
             const def = defs[String(it.itemHash)];
+            // Exotics carry no gear tier; rank them after everything else.
+            const exotic = def?.inventory?.tierType === 6;
+            const tier: number = exotic ? 6 : (inst.gearTier ?? 0);
             const score =
               info.kind === 'armor'
                 ? Object.values<any>(stats[it.itemInstanceId]?.stats ?? {}).reduce(
@@ -120,7 +127,7 @@ export const cleanupTools: ToolDef[] = [
               name: def?.displayProperties?.name ?? String(it.itemHash),
               tier,
               score,
-              reason: `tier ${tier}, ${info.kind === 'armor' ? 'stat total' : 'power'} ${score}`,
+              reason: `${exotic ? 'exotic' : `tier ${tier}`}, ${info.kind === 'armor' ? 'stat total' : 'power'} ${score}`,
             };
           })
           .sort((x, y) => x.tier - y.tier || x.score - y.score);
