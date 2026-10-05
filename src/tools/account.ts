@@ -1,5 +1,48 @@
-import { ToolDef, tool, str, fields } from './registry.js';
+import { ToolDef, ToolContext, tool, str, bool, fields } from './registry.js';
 import { CLASS_NAMES, resolveMembership } from './membership.js';
+
+/** DestinyRecordState flag: objectives not yet complete. */
+const OBJECTIVE_NOT_COMPLETED = 4;
+/** DestinyRecordState flag: hidden from the player (secret triumph not yet revealed). */
+const OBSCURED = 8;
+
+/** Find a seal (title) presentation node by node name or title text. */
+async function findSeal(ctx: ToolContext, query: string): Promise<{ node: any; title: string }> {
+  const q = query.trim().toLowerCase();
+  const nodes = (await ctx.manifest.getAll('DestinyPresentationNodeDefinition')).filter(
+    (n) => n.completionRecordHash
+  );
+  const records = await ctx.manifest.getDefinitions(
+    'DestinyRecordDefinition',
+    nodes.map((n) => n.completionRecordHash)
+  );
+  const seals = nodes
+    .map((node) => {
+      const t = records[String(node.completionRecordHash)]?.titleInfo;
+      return t?.hasTitle ? { node, title: (t.titlesByGender?.Male ?? '') as string } : null;
+    })
+    .filter((x): x is { node: any; title: string } => x !== null);
+  const name = (x: { node: any }) => (x.node.displayProperties?.name ?? '').toLowerCase();
+  const match =
+    seals.find((x) => x.title.toLowerCase() === q || name(x) === q) ??
+    seals.find((x) => x.title.toLowerCase().includes(q) || name(x).includes(q));
+  if (!match) throw new Error(`No title/seal matching "${query}".`);
+  return match;
+}
+
+/** Fraction of a record's objectives completed (by progress), 0..1. */
+function fraction(comp: any): number {
+  const objs: any[] = comp?.intervalObjectives?.length
+    ? comp.intervalObjectives
+    : (comp?.objectives ?? []);
+  if (!objs.length)
+    return (comp?.state ?? OBJECTIVE_NOT_COMPLETED) & OBJECTIVE_NOT_COMPLETED ? 0 : 1;
+  const sum = objs.reduce(
+    (acc, o) => acc + Math.min(1, (o.progress ?? 0) / Math.max(1, o.completionValue ?? 1)),
+    0
+  );
+  return sum / objs.length;
+}
 
 /** Account-level summaries for the authenticated user (or any public profile). */
 export const accountTools: ToolDef[] = [
@@ -50,6 +93,102 @@ export const accountTools: ToolDef[] = [
           };
         });
       return { membershipType, membershipId, characters };
+    }
+  ),
+
+  tool(
+    'get_title_progress',
+    'Progress toward a title (seal): its triumphs with objective progress, incomplete ones first, closest-to-done first. Find the seal by title ("Fated Weapon") or seal name ("The Edge of Fate"). Character-scoped triumphs use your best character. Omit membership to use your authenticated account.',
+    {
+      properties: {
+        title: str('Title or seal name, e.g. "Fated Weapon", "Edge of Fate", "Rivensbane"'),
+        includeComplete: bool('Also list completed triumph names (default false)'),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
+      },
+      required: ['title'],
+    },
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const { node, title } = await findSeal(ctx, a.title as string);
+
+      // Collect record hashes from the seal node and any nested child nodes.
+      const recordHashes: number[] = [];
+      const walk = async (n: any): Promise<void> => {
+        for (const r of n?.children?.records ?? []) recordHashes.push(r.recordHash);
+        const kids: number[] = (n?.children?.presentationNodes ?? []).map(
+          (c: any) => c.presentationNodeHash
+        );
+        if (!kids.length) return;
+        const defs = await ctx.manifest.getDefinitions('DestinyPresentationNodeDefinition', kids);
+        for (const k of kids) await walk(defs[String(k)]);
+      };
+      await walk(node);
+
+      const [profile, recordDefs] = await Promise.all([
+        ctx.api.getProfile(membershipType, membershipId, [900]),
+        ctx.manifest.getDefinitions('DestinyRecordDefinition', recordHashes),
+      ]);
+      const R = profile.Response ?? {};
+      const profileRecords: Record<string, any> = R.profileRecords?.data?.records ?? {};
+      const charRecords: Array<Record<string, any>> = Object.values<any>(
+        R.characterRecords?.data ?? {}
+      ).map((c) => c.records ?? {});
+
+      const objectiveHashes = new Set<number>();
+      const entries = recordHashes.map((h) => {
+        const def = recordDefs[String(h)];
+        // Character-scoped records: use the character with the most progress.
+        const comp =
+          profileRecords[String(h)] ??
+          charRecords
+            .map((c) => c[String(h)])
+            .filter(Boolean)
+            .sort((x, y) => fraction(y) - fraction(x))[0];
+        const objectives: any[] = comp?.intervalObjectives?.length
+          ? comp.intervalObjectives
+          : (comp?.objectives ?? []);
+        for (const o of objectives) objectiveHashes.add(o.objectiveHash);
+        return { h, def, comp, objectives };
+      });
+      const objectiveDefs = await ctx.manifest.getDefinitions('DestinyObjectiveDefinition', [
+        ...objectiveHashes,
+      ]);
+
+      const triumphs = entries.map(({ h, def, comp, objectives }) => {
+        const state: number = comp?.state ?? OBJECTIVE_NOT_COMPLETED;
+        const complete = (state & OBJECTIVE_NOT_COMPLETED) === 0;
+        const secret = (state & OBSCURED) !== 0;
+        return {
+          hash: h,
+          name: secret ? '(secret triumph)' : (def?.displayProperties?.name ?? String(h)),
+          description: secret ? undefined : def?.displayProperties?.description,
+          complete,
+          percent: Math.round(fraction(comp) * 100),
+          objectives: complete
+            ? undefined
+            : objectives.map((o) => ({
+                task: objectiveDefs[String(o.objectiveHash)]?.progressDescription || undefined,
+                progress: `${o.progress ?? 0}/${o.completionValue}`,
+                complete: o.complete,
+              })),
+        };
+      });
+      const incomplete = triumphs.filter((t) => !t.complete).sort((x, y) => y.percent - x.percent);
+      return {
+        seal: node.displayProperties?.name,
+        title,
+        completed: triumphs.length - incomplete.length,
+        total: triumphs.length,
+        incomplete,
+        ...(a.includeComplete === true && {
+          complete: triumphs.filter((t) => t.complete).map((t) => t.name),
+        }),
+      };
     }
   ),
 ];
