@@ -8,6 +8,23 @@ import { DestinyAPI } from './destiny-api.js';
 
 const BUNGIE_HOST = 'https://www.bungie.net';
 
+/** Weekday name in Bungie's timezone (Pacific), DST-aware. */
+const pacificWeekday = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Los_Angeles',
+  weekday: 'short',
+});
+
+/**
+ * How long a manifest version check stays fresh. The manifest only changes on
+ * game patches, which land on Tuesdays (Pacific), so check every 3h on
+ * Tuesday and daily otherwise. Lookup misses trigger an earlier check.
+ */
+function versionCheckMs(now = new Date()): number {
+  return (pacificWeekday.format(now) === 'Tue' ? 3 : 24) * 60 * 60_000;
+}
+/** Minimum gap between miss-triggered version checks (hash 0 etc. miss legitimately). */
+const MISS_RECHECK_MS = 5 * 60_000;
+
 /** Compact, display-ready item info resolved from the manifest. */
 export interface ResolvedItem {
   name: string;
@@ -33,6 +50,11 @@ export class ManifestManager {
   private version: string | null = null;
   private db: Database.Database | null = null;
   private tableNames = new Set<string>();
+  /** ms epoch of the last successful version check against Bungie. */
+  private lastChecked = 0;
+  private inflight: Promise<void> | null = null;
+  /** Per-table [id, lowercased name] lists, built lazily for name search. */
+  private nameIndex = new Map<string, Array<[number, string]>>();
 
   constructor(api: DestinyAPI, config: BungieConfig, locale = 'en') {
     this.api = api;
@@ -42,17 +64,41 @@ export class ManifestManager {
 
   // -- Lifecycle ----------------------------------------------------------
 
-  /** Ensure the SQLite DB for the current manifest version is open. */
+  /**
+   * Ensure the SQLite DB for the current manifest version is open. Bungie's
+   * manifest pointer is only re-checked per versionCheckMs(), and concurrent
+   * callers share one in-flight check/download.
+   */
   async ensure(forceRefresh = false): Promise<void> {
-    const manifest = await this.api.getManifest();
-    const resp = manifest.Response;
+    if (!forceRefresh && this.db && Date.now() - this.lastChecked < versionCheckMs()) return;
+    this.inflight ??= this.sync(forceRefresh).finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  private async sync(forceRefresh: boolean): Promise<void> {
+    let resp: any;
+    try {
+      resp = (await this.api.getManifest()).Response;
+    } catch (error) {
+      // Keep serving the DB we have if Bungie is briefly unreachable.
+      if (this.db && !forceRefresh) {
+        this.lastChecked = Date.now();
+        return;
+      }
+      throw error;
+    }
     const version: string = resp.version;
     const dbPath: string | undefined = resp.mobileWorldContentPaths?.[this.locale];
     if (!dbPath) {
       throw new Error(`No mobileWorldContentPaths for locale "${this.locale}".`);
     }
 
-    if (!forceRefresh && this.db && this.version === version) return;
+    if (!forceRefresh && this.db && this.version === version) {
+      this.lastChecked = Date.now();
+      return;
+    }
 
     const localPath = path.join(this.rootDir, version, 'world.content');
     if (forceRefresh || !fs.existsSync(localPath)) {
@@ -60,6 +106,7 @@ export class ManifestManager {
     }
 
     this.openDb(localPath, version);
+    this.lastChecked = Date.now();
     this.pruneOldVersions(version);
   }
 
@@ -74,13 +121,18 @@ export class ManifestManager {
     const entries = zip.getEntries();
     if (entries.length === 0) throw new Error('Manifest archive was empty.');
     fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    fs.writeFileSync(localPath, entries[0].getData());
+    // Write-then-rename so an interrupted download never leaves a truncated DB
+    // that existsSync() would accept forever.
+    const tmpPath = `${localPath}.tmp`;
+    fs.writeFileSync(tmpPath, entries[0].getData());
+    fs.renameSync(tmpPath, localPath);
   }
 
   private openDb(localPath: string, version: string): void {
     this.db?.close();
     this.db = new Database(localPath, { readonly: true, fileMustExist: true });
     this.version = version;
+    this.nameIndex.clear();
     this.tableNames = new Set(
       this.db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -110,12 +162,7 @@ export class ManifestManager {
   // -- Lookups ------------------------------------------------------------
 
   async getDefinition(table: string, hash: number | string): Promise<any | null> {
-    await this.ensure();
-    this.assertTable(table);
-    const row = this.requireDb()
-      .prepare(`SELECT json FROM ${table} WHERE id = ?`)
-      .get(toSignedId(hash)) as { json: string } | undefined;
-    return row ? JSON.parse(row.json) : null;
+    return (await this.getDefinitions(table, [hash]))[String(hash)];
   }
 
   async getDefinitions(
@@ -124,6 +171,16 @@ export class ManifestManager {
   ): Promise<Record<string, any>> {
     await this.ensure();
     this.assertTable(table);
+    let out = this.lookup(table, hashes);
+    // A miss may mean the game was patched since our last version check.
+    if (Object.values(out).includes(null) && (await this.recheckVersion())) {
+      this.assertTable(table);
+      out = this.lookup(table, hashes);
+    }
+    return out;
+  }
+
+  private lookup(table: string, hashes: Array<number | string>): Record<string, any> {
     const stmt = this.requireDb().prepare(`SELECT json FROM ${table} WHERE id = ?`);
     const out: Record<string, any> = {};
     for (const h of hashes) {
@@ -131,6 +188,15 @@ export class ManifestManager {
       out[String(h)] = row ? JSON.parse(row.json) : null;
     }
     return out;
+  }
+
+  /** Re-check the manifest version early (rate-limited). Returns true if it changed. */
+  private async recheckVersion(): Promise<boolean> {
+    if (Date.now() - this.lastChecked < MISS_RECHECK_MS) return false;
+    const before = this.version;
+    this.lastChecked = 0;
+    await this.ensure();
+    return this.version !== before;
   }
 
   /**
@@ -155,27 +221,40 @@ export class ManifestManager {
   }
 
   /**
-   * Case-insensitive substring search over `displayProperties.name`. Uses a
-   * SQL `LIKE` prefilter so only candidate rows are parsed in JS.
+   * Case-insensitive substring search over `displayProperties.name`. The first
+   * search on a table builds an in-memory name index (one full scan); later
+   * searches only touch the index and fetch the matching rows by id.
    */
   async searchByName(table: string, query: string, limit = 25): Promise<any[]> {
     await this.ensure();
     this.assertTable(table);
-    const rows = this.requireDb()
-      .prepare(`SELECT json FROM ${table} WHERE json LIKE ? LIMIT 5000`)
-      .all(`%${query}%`) as Array<{ json: string }>;
-
     const needle = query.toLowerCase();
+    const stmt = this.requireDb().prepare(`SELECT json FROM ${table} WHERE id = ?`);
     const results: any[] = [];
-    for (const row of rows) {
-      const def = JSON.parse(row.json);
-      const name: string | undefined = def?.displayProperties?.name;
-      if (name && name.toLowerCase().includes(needle)) {
-        results.push(def);
-        if (results.length >= limit) break;
-      }
+    for (const [id, name] of this.namesFor(table)) {
+      if (!name.includes(needle)) continue;
+      const row = stmt.get(id) as { json: string } | undefined;
+      if (row) results.push(JSON.parse(row.json));
+      if (results.length >= limit) break;
     }
     return results;
+  }
+
+  private namesFor(table: string): Array<[number, string]> {
+    let names = this.nameIndex.get(table);
+    if (!names) {
+      names = [];
+      const rows = this.requireDb().prepare(`SELECT id, json FROM ${table}`).iterate() as Iterable<{
+        id: number;
+        json: string;
+      }>;
+      for (const row of rows) {
+        const name = JSON.parse(row.json)?.displayProperties?.name;
+        if (typeof name === 'string' && name) names.push([row.id, name.toLowerCase()]);
+      }
+      this.nameIndex.set(table, names);
+    }
+    return names;
   }
 
   async listTables(): Promise<string[]> {

@@ -4,6 +4,16 @@ import { RateLimiter } from './rate-limiter.js';
 import { BungieAuth } from './auth.js';
 
 /**
+ * Client-side throttle. Bungie's per-app limit is far above this; it only
+ * smooths bursts. Real throttling is handled by retrying on 429/ThrottleSeconds.
+ */
+const RATE_LIMIT_REQUESTS = 20;
+const RATE_LIMIT_WINDOW_MS = 1000;
+/** Retries after Bungie reports throttling, and the cap on each wait. */
+const THROTTLE_RETRIES = 2;
+const MAX_THROTTLE_WAIT_MS = 10_000;
+
+/**
  * Thin, typed wrapper over the Bungie.net Platform API.
  *
  * Two request paths share rate limiting and error handling:
@@ -19,7 +29,7 @@ export class DestinyAPI {
   constructor(config: BungieConfig, auth: BungieAuth) {
     this.config = config;
     this.auth = auth;
-    this.rateLimiter = new RateLimiter(25, 10000);
+    this.rateLimiter = new RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_MS);
     this.client = axios.create({
       baseURL: config.baseUrl || 'https://www.bungie.net/Platform',
       headers: { 'X-API-Key': config.apiKey },
@@ -61,47 +71,35 @@ export class DestinyAPI {
     url: string,
     opts: { params?: any; data?: any; headers?: Record<string, string> } = {}
   ): Promise<any> {
-    await this.rateLimiter.acquire();
-    try {
-      const response = await this.client.request({
-        method,
-        url,
-        params: opts.params,
-        data: opts.data,
-        headers: opts.headers,
-      });
-
-      if (response.data?.ErrorCode !== undefined && response.data.ErrorCode !== 1) {
-        throw new Error(
-          `Bungie API Error ${response.data.ErrorCode} (${response.data.ErrorStatus}): ${response.data.Message}`
-        );
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.requestOnce(method, url, opts);
+      } catch (error) {
+        const waitMs = throttleWaitMs(error);
+        if (waitMs === null || attempt >= THROTTLE_RETRIES) throw toBungieError(error);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
-      return response.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status;
-        const data = error.response?.data as any;
-        const apiMsg: string | undefined = data?.Message;
-        const apiCode: number | undefined = data?.ErrorCode;
-        // Bungie returns HTTP 500 for many *gameplay* errors (e.g. equipping
-        // while in an activity) with a meaningful ErrorCode/Message in the body.
-        // Surface that first rather than masking it as a generic server error.
-        if (apiMsg && apiCode !== undefined && apiCode !== 1) {
-          throw new Error(`Bungie API Error ${apiCode} (${data?.ErrorStatus}): ${apiMsg}`);
-        }
-        if (status === 401) {
-          throw new Error('Unauthorized — token invalid/expired. Re-run `d2-mcp auth`.');
-        }
-        if (status === 429) {
-          throw new Error('Rate limit exceeded. Please wait before retrying.');
-        }
-        if (status && status >= 500) {
-          throw new Error('Bungie API server error. Please try again later.');
-        }
-        if (apiMsg) throw new Error(`Bungie API Error: ${apiMsg}`);
-      }
-      throw error;
     }
+  }
+
+  /** One rate-limited HTTP round trip; throws the raw error for retry triage. */
+  private async requestOnce(
+    method: 'get' | 'post',
+    url: string,
+    opts: { params?: any; data?: any; headers?: Record<string, string> }
+  ): Promise<any> {
+    await this.rateLimiter.acquire();
+    const response = await this.client.request({
+      method,
+      url,
+      params: opts.params,
+      data: opts.data,
+      headers: opts.headers,
+    });
+    if (response.data?.ErrorCode !== undefined && response.data.ErrorCode !== 1) {
+      throw new BungieBodyError(response.data);
+    }
+    return response.data;
   }
 
   private static components(components: number[]): string {
@@ -740,4 +738,44 @@ export class DestinyAPI {
   awaGetActionToken(correlationId: string) {
     return this.makeAuthRequest('get', `/Destiny2/Awa/GetActionToken/${correlationId}/`);
   }
+}
+
+/** A 200 response whose body carries a non-success Bungie ErrorCode. */
+class BungieBodyError extends Error {
+  constructor(readonly body: any) {
+    super(`Bungie API Error ${body.ErrorCode} (${body.ErrorStatus}): ${body.Message}`);
+  }
+}
+
+/** How long to wait before retrying a throttled request, or null if not throttled. */
+function throttleWaitMs(error: unknown): number | null {
+  let body: any;
+  if (error instanceof BungieBodyError) body = error.body;
+  else if (axios.isAxiosError(error)) body = error.response?.data;
+  else return null;
+  const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+  const throttleSeconds = Number(body?.ThrottleSeconds) || 0;
+  if (status !== 429 && throttleSeconds <= 0) return null;
+  return Math.min(Math.max(throttleSeconds, 1) * 1000, MAX_THROTTLE_WAIT_MS);
+}
+
+/** Map a raw request failure to a readable error. */
+function toBungieError(error: unknown): unknown {
+  if (!axios.isAxiosError(error)) return error;
+  const status = error.response?.status;
+  const data = error.response?.data as any;
+  const apiMsg: string | undefined = data?.Message;
+  const apiCode: number | undefined = data?.ErrorCode;
+  // Bungie returns HTTP 500 for many *gameplay* errors (e.g. equipping
+  // while in an activity) with a meaningful ErrorCode/Message in the body.
+  // Surface that first rather than masking it as a generic server error.
+  if (apiMsg && apiCode !== undefined && apiCode !== 1) {
+    return new Error(`Bungie API Error ${apiCode} (${data?.ErrorStatus}): ${apiMsg}`);
+  }
+  if (status === 401)
+    return new Error('Unauthorized — token invalid/expired. Re-run `d2-mcp auth`.');
+  if (status === 429) return new Error('Rate limit exceeded. Please wait before retrying.');
+  if (status && status >= 500) return new Error('Bungie API server error. Please try again later.');
+  if (apiMsg) return new Error(`Bungie API Error: ${apiMsg}`);
+  return error;
 }

@@ -43,7 +43,7 @@ export function createMCPServer(ctx: ToolContext = buildContext()) {
     if (!entry) return errorResult(`Unknown tool: ${name}`);
     try {
       const result = await entry.handler(ctx, args ?? {});
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }

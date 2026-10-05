@@ -154,6 +154,14 @@ export class InventoryCache {
   /** Fetch, flatten, and name-resolve a membership's inventory; cache it. */
   async refresh(membershipType: number, membershipId: string): Promise<InventorySnapshot> {
     const profile = await this.api.getInventoryProfile(membershipType, membershipId);
+    return this.buildInventory(membershipType, membershipId, profile);
+  }
+
+  private async buildInventory(
+    membershipType: number,
+    membershipId: string,
+    profile: any
+  ): Promise<InventorySnapshot> {
     const R = profile.Response ?? {};
 
     const classOf = (cid: string): string => {
@@ -214,6 +222,27 @@ export class InventoryCache {
   /** Fetch armor with per-instance stats/tier/energy and name-resolve it; cache it. */
   async refreshArmor(membershipType: number, membershipId: string): Promise<ArmorSnapshot> {
     const profile = await this.api.getArmorProfile(membershipType, membershipId);
+    return this.buildArmor(membershipType, membershipId, profile);
+  }
+
+  /** Refresh both snapshots from ONE profile fetch (the armor component set is a superset). */
+  async refreshBoth(
+    membershipType: number,
+    membershipId: string
+  ): Promise<{ inventory: InventorySnapshot; armor: ArmorSnapshot }> {
+    const profile = await this.api.getArmorProfile(membershipType, membershipId);
+    const [inventory, armor] = await Promise.all([
+      this.buildInventory(membershipType, membershipId, profile),
+      this.buildArmor(membershipType, membershipId, profile),
+    ]);
+    return { inventory, armor };
+  }
+
+  private async buildArmor(
+    membershipType: number,
+    membershipId: string,
+    profile: any
+  ): Promise<ArmorSnapshot> {
     const R = profile.Response ?? {};
     const instances: Record<string, any> = R.itemComponents?.instances?.data ?? {};
     const statsData: Record<string, any> = R.itemComponents?.stats?.data ?? {};
@@ -328,10 +357,9 @@ export class InventoryCache {
     try {
       const p = await this.resolvePrimary();
       if (!p) return;
-      const snap = await this.refresh(p.membershipType, p.membershipId);
-      const armor = await this.refreshArmor(p.membershipType, p.membershipId);
+      const { inventory, armor } = await this.refreshBoth(p.membershipType, p.membershipId);
       console.error(
-        `[inventory] refreshed ${snap.items.length} items, ${armor.armor.length} armor.`
+        `[inventory] refreshed ${inventory.items.length} items, ${armor.armor.length} armor.`
       );
     } catch (error) {
       console.error(
