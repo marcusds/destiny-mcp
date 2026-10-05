@@ -314,7 +314,7 @@ export const accountTools: ToolDef[] = [
         .map((f) => {
           const def = defs[String(f.progressionHash)];
           const steps: any[] = def?.steps ?? [];
-          const name: string = def?.displayProperties?.name ?? String(f.progressionHash);
+          const name: string = def?.displayProperties?.name ?? '';
           // Rank N is step index N-1; a step's progressTotal is the rep needed to finish it.
           const rank = f.level + 1;
           let toTarget: number | undefined;
@@ -336,7 +336,7 @@ export const accountTools: ToolDef[] = [
             ...(toTarget !== undefined && { [`toRank${target}`]: toTarget }),
           };
         })
-        .filter((r) => !q || r.name.toLowerCase().includes(q))
+        .filter((r) => r.name && (!q || r.name.toLowerCase().includes(q)))
         .sort((x, y) => x.name.localeCompare(y.name));
       return { characterId, reputations };
     }
