@@ -10,6 +10,7 @@ import { socialTools } from './social.js';
 import { inventoryTools } from './inventory.js';
 import { loadoutTools } from './loadout.js';
 import { accountTools } from './account.js';
+import { cleanupTools } from './cleanup.js';
 
 /** The full set of tools exposed by the server. */
 export const allTools: ToolDef[] = [
@@ -17,6 +18,7 @@ export const allTools: ToolDef[] = [
   ...readTools,
   ...inventoryTools,
   ...loadoutTools,
+  ...cleanupTools,
   ...statsTools,
   ...userTools,
   ...clanTools,
