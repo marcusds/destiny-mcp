@@ -196,3 +196,38 @@ test('get_title_progress treats finished interval triumphs as complete and repor
     [['Stitchripper', 33, '1/3']]
   );
 });
+
+test('get_checklist lists missing entries, merging character-scoped progress', async () => {
+  const checklist = {
+    hash: 77,
+    displayProperties: { name: 'Kepler Urns' },
+    entries: [1, 2, 3].map((h) => ({ hash: h, displayProperties: { name: `Kepler Urn #${h}` } })),
+  };
+  const ctx: any = {
+    inventory: { resolvePrimary: async () => primary },
+    manifest: {
+      getAll: async () => [
+        { hash: 5, displayProperties: { name: 'Cat Statues' }, entries: [] },
+        checklist,
+      ],
+    },
+    api: {
+      getProfile: async () => ({
+        Response: {
+          profileProgression: { data: { checklists: { 77: { 1: true, 2: false, 3: false } } } },
+          characterProgressions: { data: { c1: { checklists: { 77: { 3: true } } } } },
+        },
+      }),
+    },
+  };
+  assert.deepEqual(await run('get_checklist', ctx, { name: 'urns' }), {
+    checklist: 'Kepler Urns',
+    found: 2,
+    total: 3,
+    missing: ['Kepler Urn #2'],
+  });
+  assert.deepEqual(
+    (await run('get_checklist', ctx, {})).map((c: any) => c.name),
+    ['Cat Statues', 'Kepler Urns']
+  );
+});

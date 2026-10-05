@@ -207,4 +207,54 @@ export const accountTools: ToolDef[] = [
       };
     }
   ),
+
+  tool(
+    'get_checklist',
+    'Which individual collectibles you have found in a checklist (e.g. "Kepler Urns", "Kepler Ability Chests", "Feathers of Light", "Lost Sectors", "Region Chests"). Returns found/total and the missing entries by name/number. Omit name to list available checklists. Omit membership to use your authenticated account.',
+    {
+      properties: {
+        name: str('Checklist name or part of it (omit to list all checklists)'),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
+      },
+    },
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const all = await ctx.manifest.getAll('DestinyChecklistDefinition');
+      const q = (a.name as string | undefined)?.trim().toLowerCase();
+      if (!q) {
+        return all
+          .map((c) => ({ name: c.displayProperties?.name, entries: c.entries?.length ?? 0 }))
+          .filter((c) => c.name)
+          .sort((x, y) => x.name.localeCompare(y.name));
+      }
+      const name = (c: any) => (c.displayProperties?.name ?? '').toLowerCase();
+      const checklist = all.find((c) => name(c) === q) ?? all.find((c) => name(c).includes(q));
+      if (!checklist) throw new Error(`No checklist matching "${a.name}".`);
+
+      const profile = await ctx.api.getProfile(membershipType, membershipId, [104]);
+      const R = profile.Response ?? {};
+      const key = String(checklist.hash);
+      // Profile-scoped checklists live on profileProgression; character-scoped
+      // ones on each character (an entry counts as found on any character).
+      const states: Array<Record<string, boolean>> = [
+        R.profileProgression?.data?.checklists?.[key],
+        ...Object.values<any>(R.characterProgressions?.data ?? {}).map((c) => c.checklists?.[key]),
+      ].filter(Boolean);
+      const entries: any[] = checklist.entries ?? [];
+      const missing = entries
+        .filter((e) => !states.some((s) => s[String(e.hash)]))
+        .map((e) => e.displayProperties?.name ?? String(e.hash));
+      return {
+        checklist: checklist.displayProperties?.name,
+        found: entries.length - missing.length,
+        total: entries.length,
+        missing,
+      };
+    }
+  ),
 ];
