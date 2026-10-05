@@ -13,6 +13,10 @@ export interface InventoryRow {
   location: string;
   /** Class name (Titan/Hunter/Warlock) when the item sits on a character. */
   character?: string;
+  /** Character ID when the item sits on a character. */
+  characterId?: string;
+  /** The item's slot bucket (from its definition), e.g. helmet or kinetic weapons. */
+  bucketHash?: number;
   quantity: number;
   instanceId?: string;
   hash: number;
@@ -183,14 +187,14 @@ export class InventoryCache {
       return c ? (CLASSES[c.classType] ?? cid) : cid;
     };
 
-    const raw: Array<Omit<InventoryRow, 'name' | 'itemType' | 'tier'>> = [];
+    const raw: Array<Omit<InventoryRow, 'name' | 'itemType' | 'tier' | 'bucketHash'>> = [];
     for (const it of R.profileInventory?.data?.items ?? []) raw.push(toRaw(it));
     for (const [cid, inv] of Object.entries(R.characterInventories?.data ?? {})) {
-      for (const it of (inv as any).items ?? []) raw.push(toRaw(it, classOf(cid)));
+      for (const it of (inv as any).items ?? []) raw.push(toRaw(it, classOf(cid), cid));
     }
     for (const [cid, eq] of Object.entries(R.characterEquipment?.data ?? {})) {
       for (const it of (eq as any).items ?? []) {
-        raw.push({ ...toRaw(it, classOf(cid)), location: 'equipped' });
+        raw.push({ ...toRaw(it, classOf(cid), cid), location: 'equipped' });
       }
     }
 
@@ -202,6 +206,7 @@ export class InventoryCache {
         name: def?.name ?? '',
         itemType: def?.itemType ?? '',
         tier: def?.tier ?? '',
+        bucketHash: def?.bucketHash,
       };
     });
     items.sort((a, b) => a.name.localeCompare(b.name));
@@ -398,12 +403,17 @@ export class InventoryCache {
   }
 }
 
-function toRaw(it: any, character?: string): Omit<InventoryRow, 'name' | 'itemType' | 'tier'> {
+function toRaw(
+  it: any,
+  character?: string,
+  characterId?: string
+): Omit<InventoryRow, 'name' | 'itemType' | 'tier' | 'bucketHash'> {
   return {
     hash: it.itemHash,
     quantity: it.quantity ?? 1,
     location: LOCATIONS[it.location] ?? 'other',
     character,
+    characterId,
     instanceId: it.itemInstanceId,
   };
 }

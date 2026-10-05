@@ -15,6 +15,7 @@ export const inventoryTools: ToolDef[] = [
         membershipType: fields.membershipType(),
         membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
         location: str('Filter by location: vault | inventory | equipped | postmaster | vendor'),
+        character: str('Filter by character: class name (Titan | Hunter | Warlock) or characterId'),
         itemType: str('Filter by item type substring (e.g. "Hand Cannon", "Helmet")'),
         tier: str('Filter by tier: Exotic | Legendary | Rare | Common | Uncommon'),
         nameContains: str('Filter by item name substring'),
@@ -45,6 +46,7 @@ export const inventoryTools: ToolDef[] = [
 
       const rows = filterRows(snap.items, {
         location: a.location as string | undefined,
+        character: a.character as string | undefined,
         itemType: a.itemType as string | undefined,
         tier: a.tier as string | undefined,
         nameContains: a.nameContains as string | undefined,
@@ -105,14 +107,22 @@ export const inventoryTools: ToolDef[] = [
 
 function filterRows(
   rows: InventoryRow[],
-  f: { location?: string; itemType?: string; tier?: string; nameContains?: string }
+  f: {
+    location?: string;
+    character?: string;
+    itemType?: string;
+    tier?: string;
+    nameContains?: string;
+  }
 ): InventoryRow[] {
   const loc = f.location?.toLowerCase();
+  const char = f.character?.toLowerCase();
   const type = f.itemType?.toLowerCase();
   const tier = f.tier?.toLowerCase();
   const name = f.nameContains?.toLowerCase();
   return rows.filter((r) => {
     if (loc && r.location !== loc) return false;
+    if (char && r.character?.toLowerCase() !== char && r.characterId !== f.character) return false;
     if (type && !r.itemType.toLowerCase().includes(type)) return false;
     if (tier && r.tier.toLowerCase() !== tier) return false;
     if (name && !r.name.toLowerCase().includes(name)) return false;

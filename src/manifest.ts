@@ -32,6 +32,8 @@ export interface ResolvedItem {
   tier: string;
   itemTypeEnum: number;
   tierEnum: number;
+  /** Inventory bucket the item lives in when on a character (weapon/armor slot etc.). */
+  bucketHash: number;
 }
 
 /**
@@ -217,6 +219,7 @@ export class ManifestManager {
             tier: def.inventory?.tierTypeName ?? '',
             itemTypeEnum: def.itemType ?? 0,
             tierEnum: def.inventory?.tierType ?? 0,
+            bucketHash: def.inventory?.bucketTypeHash ?? 0,
           }
         : null;
     }

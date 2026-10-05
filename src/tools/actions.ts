@@ -218,26 +218,6 @@ export const actionTools: ToolDef[] = [
   ),
 
   tool(
-    'equip_loadout',
-    "[auth][write] Equip one of a character's saved loadouts by index (0-9)",
-    {
-      properties: {
-        loadoutIndex: num('Loadout slot index (0-9)'),
-        characterId: fields.characterId(),
-        membershipType: fields.membershipType(),
-      },
-      required: ['loadoutIndex', 'characterId', 'membershipType'],
-    },
-    (ctx, a) =>
-      ctx.api.equipLoadout({
-        loadoutIndex: a.loadoutIndex as number,
-        characterId: a.characterId as string,
-        membershipType: a.membershipType as number,
-      }),
-    { write: true }
-  ),
-
-  tool(
     'snapshot_loadout',
     "[auth][write] Save the character's current equipment into a loadout slot",
     {

@@ -1,5 +1,6 @@
 import { ToolDef, ToolContext, tool, num, str, bool, strArr, fields } from './registry.js';
 import { resolveMembership } from './membership.js';
+import { InventoryRow } from '../inventory.js';
 
 const LOADOUT_SENTINEL = 2166136261; // FNV offset basis — Bungie's "unset/locked slot" marker
 
@@ -116,7 +117,154 @@ async function loadItemSockets(
   return { sockets, energy, socketCount, candidates, defs, nameOf, isEmpty };
 }
 
+/** Bungie error when the destination bucket has no free slot. */
+const NO_ROOM = /NoRoomInDestination|1642/;
+
+/**
+ * Bring every loadout item onto the target character so EquipLoadout can use it.
+ * Bungie's EquipLoadout silently skips items that are in the vault or on another
+ * character, so: vault -> character; other character -> vault -> character. When
+ * the character's slot is full, an unequipped non-loadout item in that bucket is
+ * moved to the vault to make room. Returns per-item notes for anything skipped.
+ */
+async function stageLoadoutItems(
+  ctx: ToolContext,
+  membershipType: number,
+  characterId: string,
+  loadoutIds: Set<string>,
+  rows: InventoryRow[]
+): Promise<{ moved: string[]; problems: string[] }> {
+  const moved: string[] = [];
+  const problems: string[] = [];
+  const transfer = (row: InventoryRow, toVault: boolean, charId: string) =>
+    ctx.api.transferItem({
+      itemReferenceHash: row.hash,
+      stackSize: 1,
+      transferToVault: toVault,
+      itemId: row.instanceId!,
+      characterId: charId,
+      membershipType,
+    });
+
+  /** Move one spare item out of `bucketHash` on the target character. */
+  const makeRoom = async (bucketHash: number | undefined): Promise<boolean> => {
+    const spare = rows.find(
+      (r) =>
+        r.characterId === characterId &&
+        r.location === 'inventory' &&
+        r.bucketHash === bucketHash &&
+        r.instanceId &&
+        !loadoutIds.has(r.instanceId)
+    );
+    if (!spare) return false;
+    await transfer(spare, true, characterId);
+    spare.location = 'vault';
+    spare.characterId = undefined;
+    moved.push(`${spare.name} -> vault (to make room)`);
+    return true;
+  };
+
+  for (const id of loadoutIds) {
+    const row = rows.find((r) => r.instanceId === id);
+    if (!row) {
+      problems.push(`${id}: not found (dismantled?)`);
+      continue;
+    }
+    if (row.characterId === characterId) continue;
+    if (row.location === 'equipped') {
+      problems.push(`${row.name}: equipped on your ${row.character}; unequip it there first`);
+      continue;
+    }
+    try {
+      if (row.characterId) {
+        await transfer(row, true, row.characterId); // other character -> vault
+        row.location = 'vault';
+      }
+      try {
+        await transfer(row, false, characterId);
+      } catch (e) {
+        if (!(e instanceof Error && NO_ROOM.test(e.message)) || !(await makeRoom(row.bucketHash))) {
+          throw e;
+        }
+        await transfer(row, false, characterId);
+      }
+      row.location = 'inventory';
+      row.characterId = characterId;
+      moved.push(`${row.name} -> character`);
+    } catch (e) {
+      problems.push(`${row.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return { moved, problems };
+}
+
 export const loadoutTools: ToolDef[] = [
+  tool(
+    'equip_loadout',
+    "[auth][write] Equip one of a character's in-game loadouts by index (see get_character_loadouts). Unlike Bungie's raw endpoint, first pulls loadout items from the vault or your other characters (making room if a slot is full), then verifies and reports anything that didn't equip. Must not be in an activity that locks gear.",
+    {
+      properties: {
+        loadoutIndex: num('Loadout slot index'),
+        characterId: fields.characterId(),
+        membershipType: fields.membershipType(),
+        membershipId: str('Destiny membership ID (omit to use your authenticated account)'),
+      },
+      required: ['loadoutIndex', 'characterId'],
+    },
+    async (ctx, a) => {
+      const { membershipType, membershipId } = await resolveMembership(
+        ctx,
+        a.membershipType as number | undefined,
+        a.membershipId as string | undefined
+      );
+      const characterId = a.characterId as string;
+      const loadoutIndex = a.loadoutIndex as number;
+
+      const [prof, snap] = await Promise.all([
+        ctx.api.getCharacterLoadouts(membershipType, membershipId),
+        ctx.inventory.refresh(membershipType, membershipId),
+      ]);
+      const loadout =
+        prof.Response?.characterLoadouts?.data?.[characterId]?.loadouts?.[loadoutIndex];
+      if (!loadout) throw new Error(`No loadout at index ${loadoutIndex} for this character.`);
+      const loadoutIds = new Set<string>(
+        (loadout.items ?? [])
+          .map((it: any) => it.itemInstanceId)
+          .filter((id: string | undefined) => id && id !== '0')
+      );
+      if (loadoutIds.size === 0) throw new Error(`Loadout ${loadoutIndex} is empty.`);
+
+      const rows = snap.items.map((r) => ({ ...r }));
+      const { moved, problems } = await stageLoadoutItems(
+        ctx,
+        membershipType,
+        characterId,
+        loadoutIds,
+        rows
+      );
+      await ctx.api.equipLoadout({ loadoutIndex, characterId, membershipType });
+
+      // Verify against a fresh read; Bungie reports success even for partial equips.
+      const after = await ctx.inventory.refresh(membershipType, membershipId);
+      const equipped = new Set(
+        after.items
+          .filter((r) => r.location === 'equipped' && r.characterId === characterId)
+          .map((r) => r.instanceId)
+      );
+      const name = (id: string) => rows.find((r) => r.instanceId === id)?.name ?? id;
+      const notEquipped = [...loadoutIds].filter((id) => !equipped.has(id)).map(name);
+      return {
+        loadoutIndex,
+        equipped: loadoutIds.size - notEquipped.length,
+        total: loadoutIds.size,
+        moved,
+        notEquipped,
+        problems,
+      };
+    },
+    { write: true }
+  ),
+
   // -- Name-based, socket-aware, current-version plug insert -----------------
   tool(
     'insert_plug_by_name',
